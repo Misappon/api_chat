@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -110,6 +112,40 @@ class ImporterTests(unittest.TestCase):
         self.assertEqual(len(result.messages), 2)
         self.assertEqual(len(result.messages[0].attachments), 1)
         self.assertEqual(result.messages[0].attachments[0].kind, "image")
+
+    def test_import_from_public_url(self) -> None:
+        from apichat.importer import import_from_url
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                return
+
+            def do_GET(self):
+                body = (
+                    "<html><head><title>网址分享</title></head><body>"
+                    '<div data-message-author-role="user">你好</div>'
+                    '<div data-message-author-role="assistant">你好，这是回答。</div>'
+                    "</body></html>"
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            result = import_from_url(
+                f"http://127.0.0.1:{server.server_address[1]}/share", download_images=False
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        self.assertEqual(result.title, "网址分享")
+        self.assertEqual(len(result.messages), 2)
 
     def test_text_fallback(self) -> None:
         result = parse_transcript(
