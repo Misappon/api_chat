@@ -186,6 +186,8 @@ build_exe.bat
 - 手机与电脑连接同一个 Wi-Fi，用手机浏览器打开窗口中显示的地址即可。
 - 首次访问需要访问码；分享链接中已包含访问码。页面提供对话列表、消息查看、图片/文件附件、新建对话和继续聊天。
 - 手机端发送消息会调用该对话绑定的 API，并将用户消息、助手回复和 usage 一起写入当前数据库；桌面端会同步刷新。
+- 手机端消息支持 Markdown 渲染（标题、粗体、列表、代码块、表格和链接）；脚本和危险链接会被过滤。
+- 「停止共享」会同时关闭监听端口和已有浏览器连接，手机刷新后立即无法访问。
 - 关闭设置窗口不会停止服务；需要停止时再次打开并点击「停止共享」。
 - 电脑端关闭程序时会自动停止共享。
 - Windows 防火墙首次可能询问是否允许 Python/APIChat 访问网络，请允许专用网络。
@@ -261,7 +263,7 @@ python -m unittest discover -s tests -v
 - `tests/test_llm.py` 启动本地假 HTTP 服务，测试 OpenAI SSE、Anthropic Messages、Gemini generateContent、多模态 payload 和错误信息，不需要真实 API Key。
 - `tests/test_importer.py` 覆盖 ChatGPT JSON、Claude JSON、DOM、文本兜底、HTML 图片和导出格式。
 - `tests/test_lan_server.py` 覆盖访问码、移动端页面、对话列表、附件下载、新建对话和手机端发送消息。
-- 当前共 23 个测试。
+- 当前共 24 个测试。
 - 可选的演示数据：
 
   ```powershell

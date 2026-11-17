@@ -73,7 +73,7 @@ class LanServerTests(unittest.TestCase):
                 )
             ],
         )
-        cls.repo.add_message(cls.conversation_id, "assistant", "hi there")
+        cls.repo.add_message(cls.conversation_id, "assistant", "**hi** there")
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -132,6 +132,8 @@ class LanServerTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             messages = response.json()["messages"]
             self.assertEqual(len(messages), 2)
+            self.assertIn("<strong>hi</strong>", messages[1]["html"])
+            self.assertNotIn("<script>", messages[1]["html"])
             attachment_id = messages[0]["attachments"][0]["id"]
             attachment = client.get(
                 self.base + f"/api/attachments/{attachment_id}?token=testtoken"
@@ -155,6 +157,30 @@ class LanServerTests(unittest.TestCase):
         self.assertIn(conversation_id, self.changes)
         messages = self.repo.list_messages(conversation_id)
         self.assertEqual([message.role for message in messages], ["user", "assistant"])
+
+    def test_stop_sharing_closes_listener_and_connections(self) -> None:
+        with httpx.Client(timeout=5, trust_env=False) as client:
+            first = client.get(self.base + "/?token=testtoken")
+            self.assertEqual(first.status_code, 200)
+            self.server.stop()
+            self.assertFalse(self.server.running)
+            with self.assertRaises(httpx.HTTPError):
+                client.get(self.base + "/?token=testtoken")
+
+        # The same port can be used again immediately after stopping.
+        restarted = LanShareServer(
+            lambda: self.config,
+            port=self.port,
+            token="testtoken",
+        )
+        restarted.start()
+        try:
+            with httpx.Client(timeout=5, trust_env=False) as client:
+                self.assertEqual(
+                    client.get(self.base + "/?token=testtoken").status_code, 200
+                )
+        finally:
+            restarted.stop()
 
 
 if __name__ == "__main__":

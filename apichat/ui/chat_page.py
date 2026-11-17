@@ -57,6 +57,10 @@ class ComposerEdit(QPlainTextEdit):
         self.document().setDocumentMargin(2)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(30)
+        self._height_timer = QTimer(self)
+        self._height_timer.setSingleShot(True)
+        self._height_timer.setInterval(0)
+        self._height_timer.timeout.connect(self._apply_height)
         self.textChanged.connect(self._adjust_height)
 
     def insertFromMimeData(self, source) -> None:  # noqa: N802 (Qt API)
@@ -90,22 +94,25 @@ class ComposerEdit(QPlainTextEdit):
         super().dropEvent(event)
 
     def _adjust_height(self) -> None:
+        # QPlainTextEdit's document layout updates after the current event.
+        self._height_timer.start()
+
+    def _apply_height(self) -> None:
+        document = self.document()
+        total_height = 0.0
+        for index in range(document.blockCount()):
+            block = document.findBlockByNumber(index)
+            total_height += document.documentLayout().blockBoundingRect(block).height()
         line_height = self.fontMetrics().lineSpacing()
-        line_count = max(1, self.blockCount())
-        layout_height = int(self.document().documentLayout().documentSize().height())
-        height = max(
-            line_height * line_count + 10,
-            layout_height + 8,
-            30,
-        )
-        height = min(height, 150)
+        total_height = max(total_height, line_height)
+        height = min(150, max(30, int(round(total_height)) + 10))
         if self.height() != height:
             self.setFixedHeight(height)
             self.updateGeometry()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._adjust_height()
+        self._apply_height()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):

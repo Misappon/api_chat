@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import hmac
 import json
 import mimetypes
@@ -9,9 +10,12 @@ import secrets
 import socket
 import threading
 from datetime import datetime
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, quote, urlparse
+
+import markdown
 
 from .db import Database
 from .llm import LLMClient
@@ -48,6 +52,72 @@ def _iso(value: Optional[datetime]) -> str:
     return value.isoformat(timespec="seconds") if value else ""
 
 
+_MARKDOWN_TAGS = {
+    "p", "br", "hr", "strong", "em", "del", "code", "pre",
+    "h1", "h2", "h3", "h4", "blockquote", "ul", "ol", "li",
+    "table", "thead", "tbody", "tr", "th", "td", "a",
+}
+
+
+class _SafeMarkdownParser(HTMLParser):
+    """Keep markdown output inert and strip scripts/event attributes."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._stack: list[Optional[str]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        tag = tag.lower()
+        if tag not in _MARKDOWN_TAGS:
+            self._stack.append(None)
+            return
+        attributes: list[tuple[str, str]] = []
+        if tag == "a":
+            href = next((value or "" for key, value in attrs if key.lower() == "href"), "")
+            if not href.lower().startswith(("http://", "https://")):
+                self._stack.append(None)
+                return
+            attributes = [
+                ("href", html.escape(href, quote=True)),
+                ("target", "_blank"),
+                ("rel", "noopener noreferrer"),
+            ]
+        attr_text = "".join(f' {key}="{value}"' for key, value in attributes)
+        self.parts.append(f"<{tag}{attr_text}>")
+        self._stack.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if tag.lower() in {"br", "hr"}:
+            self.parts.append(f"<{tag.lower()}>")
+            return
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if not self._stack:
+            return
+        open_tag = self._stack.pop()
+        if open_tag == tag.lower():
+            self.parts.append(f"</{tag.lower()}>")
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(html.escape(data, quote=False))
+
+
+def _markdown_html(text: str) -> str:
+    escaped = html.escape(text or "", quote=False)
+    rendered = markdown.markdown(
+        escaped,
+        extensions=["fenced_code", "tables", "sane_lists", "nl2br"],
+        output_format="html",
+    )
+    parser = _SafeMarkdownParser()
+    parser.feed(rendered)
+    parser.close()
+    return "".join(parser.parts)
+
+
 def _conversation_json(conversation: Conversation) -> dict[str, Any]:
     return {
         "id": conversation.id,
@@ -69,6 +139,7 @@ def _message_json(message: Message) -> dict[str, Any]:
         "id": message.id,
         "role": message.role,
         "content": message.content,
+        "html": _markdown_html(message.content),
         "created_at": _iso(message.created_at),
         "token_count": message.token_count,
         "attachments": [
@@ -96,6 +167,22 @@ class _Handler(BaseHTTPRequestHandler):
     @property
     def share(self) -> "LanShareServer":
         return self.server.share_server  # type: ignore[attr-defined]
+
+    def setup(self) -> None:
+        super().setup()
+        self.share.add_connection(self.connection)
+
+    def finish(self) -> None:
+        try:
+            super().finish()
+        finally:
+            self.share.remove_connection(self.connection)
+
+    def _write(self, data: bytes) -> None:
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            self.close_connection = True
 
     # ------------------------------------------------------------------
     def do_GET(self) -> None:  # noqa: N802
@@ -178,8 +265,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.close_connection = True
         self.end_headers()
-        self.wfile.write(data)
+        self._write(data)
 
     def _send_html(self, content: str, status: int = 200) -> None:
         data = content.encode("utf-8")
@@ -193,8 +282,10 @@ class _Handler(BaseHTTPRequestHandler):
             "default-src 'self' data:; style-src 'unsafe-inline'; "
             "script-src 'unsafe-inline'; img-src 'self' data:;",
         )
+        self.send_header("Connection", "close")
+        self.close_connection = True
         self.end_headers()
-        self.wfile.write(data)
+        self._write(data)
 
     def _repo(self) -> tuple[Database, Repository]:
         config = self.share.db_config_getter()
@@ -261,8 +352,10 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", f"inline; filename*=UTF-8''{quote(attachment.filename)}")
             self.send_header("Cache-Control", "private, max-age=3600")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Connection", "close")
+            self.close_connection = True
             self.end_headers()
-            self.wfile.write(data)
+            self._write(data)
         finally:
             db.close()
 
@@ -376,6 +469,16 @@ class LanShareServer:
         self.token = token or new_access_token()
         self._httpd: Optional[_ShareHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._connections: set[Any] = set()
+        self._connections_lock = threading.Lock()
+
+    def add_connection(self, connection: Any) -> None:
+        with self._connections_lock:
+            self._connections.add(connection)
+
+    def remove_connection(self, connection: Any) -> None:
+        with self._connections_lock:
+            self._connections.discard(connection)
 
     @property
     def running(self) -> bool:
@@ -410,6 +513,18 @@ class LanShareServer:
         if httpd is not None:
             httpd.shutdown()
             httpd.server_close()
+        with self._connections_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+        for connection in connections:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                connection.close()
+            except OSError:
+                pass
         if thread is not None:
             thread.join(timeout=3)
 
@@ -483,7 +598,24 @@ font-size:10px;font-weight:700;background:#172c2a;color:var(--green);border:1px 
 .msg.user .avatar{background:#2c4b91;color:#dce6ff;border-color:#3a5db7}
 .bubble{min-width:0;max-width:calc(100% - 36px);padding:10px 12px;border-radius:14px;
 background:var(--surface);border:1px solid #1b2331;font-size:14px;line-height:1.62;
-white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word}
+white-space:normal;overflow-wrap:anywhere;word-break:break-word}
+.bubble .plain{white-space:pre-wrap}
+.bubble p{margin:0 0 8px}
+.bubble p:last-child{margin-bottom:0}
+.bubble h1,.bubble h2,.bubble h3,.bubble h4{color:#f2f6ff;margin:12px 0 6px}
+.bubble h1{font-size:19px}.bubble h2{font-size:17px}.bubble h3{font-size:15px}
+.bubble ul,.bubble ol{margin:4px 0 8px;padding-left:20px}
+.bubble li{margin:2px 0}
+.bubble pre{background:#0a1019;border:1px solid #26324a;padding:9px;border-radius:8px;
+margin:8px 0;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
+.bubble code{font-family:"Cascadia Mono",Consolas,monospace;background:#0c121d;
+color:#bfd0ff;padding:1px 4px;border-radius:4px;font-size:12px}
+.bubble pre code{background:transparent;color:#dce6f8;padding:0}
+.bubble blockquote{color:#a9b6cc;border-left:3px solid #3e537e;margin:6px 0;padding-left:10px}
+.bubble a{color:#94adff;text-decoration:none}
+.bubble table{width:100%;border-collapse:collapse;margin:6px 0;font-size:12px}
+.bubble th,.bubble td{border:1px solid #2b3850;padding:4px 6px;text-align:left}
+.bubble th{background:#151e2c;color:#f0f4fc}
 .msg.user .bubble{background:#223c78;border-color:#2e4c90}
 .meta{font-size:9px;color:var(--faint);margin-top:5px;text-align:right}
 .msg.user .meta{text-align:left}
@@ -581,7 +713,7 @@ function renderMessages(data){
     const time=(m.created_at||'').replace('T',' ').slice(0,16);
     return `<div class="msg ${user?'user':'assistant'}">
       <div class="avatar">${user?'你':'AI'}</div>
-      <div class="bubble">${esc(m.content)}${imgs}${files}
+      <div class="bubble">${m.html || '<div class="plain">'+esc(m.content)+'</div>'}${imgs}${files}
         <div class="meta">${esc(time)}</div></div></div>`;
   }).join('');
   scrollBottom();
