@@ -448,8 +448,20 @@ def _dom_messages(soup: BeautifulSoup, base_url: str) -> list[ImportedMessage]:
                     continue
                 if src.startswith("data:image/svg"):
                     continue
-                if not _looks_like_image_url(src) and not src.startswith("data:image/"):
+                class_text = " ".join(image.get("class", [])).lower()
+                alt_text = (image.get("alt") or "").lower()
+                if any(token in class_text or token in alt_text for token in ("avatar", "emoji", "icon")):
                     continue
+                try:
+                    width = int(str(image.get("width") or "0").replace("px", ""))
+                    height = int(str(image.get("height") or "0").replace("px", ""))
+                except ValueError:
+                    width = height = 0
+                if (width and width < 80) or (height and height < 80):
+                    continue
+                if not _looks_like_image_url(src) and not src.startswith("data:image/"):
+                    if width < 100 or height < 100:
+                        continue
                 image_urls.append(urljoin(base_url, src) if not src.startswith("data:") else src)
             if text or image_urls:
                 messages.append(
@@ -612,9 +624,14 @@ def _download_images(
     max_images: int = MAX_IMPORTED_IMAGES,
 ) -> None:
     pending: list[tuple[ImportedMessage, str]] = []
+    seen_urls: set[str] = set()
     for message in conversation.messages:
         for url in message.image_urls:
-            pending.append((message, urljoin(base_url, url) if base_url else url))
+            absolute = urljoin(base_url, url) if base_url else url
+            if absolute in seen_urls:
+                continue
+            seen_urls.add(absolute)
+            pending.append((message, absolute))
     if not pending:
         return
     downloaded = 0
