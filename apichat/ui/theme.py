@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import re
 import sys
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -29,6 +30,11 @@ RED = "#FF7483"
 CYAN = "#5DD6E8"
 
 FONT_FAMILY = '"Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI"'
+DEFAULT_FONT_SCALE = 1.0
+MIN_FONT_SCALE = 0.80
+MAX_FONT_SCALE = 1.50
+FONT_SCALE_STEP = 0.05
+_FONT_SCALE = DEFAULT_FONT_SCALE
 _ASSET_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
 _CHEVRON_DOWN = (_ASSET_ROOT / "assets" / "chevron-down.svg").as_posix()
 _CHEVRON_UP = (_ASSET_ROOT / "assets" / "chevron-up.svg").as_posix()
@@ -489,6 +495,23 @@ QWidget#dashboardCanvas {{ background-color: {BG}; }}
 QWidget#dashboardHeader {{ background-color: {BG}; }}
 QLabel#pageTitle {{ font-size: 24px; font-weight: 700; }}
 QLabel#pageSubtitle {{ color: {MUTED}; font-size: 11px; }}
+QFrame#fontBox {{
+    background-color: {SURFACE};
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 9px;
+}}
+QLabel#fontLabel {{ color: {FAINT}; font-size: 10px; }}
+QLabel#fontValue {{ color: {TEXT}; font-size: 10px; font-weight: 700; min-width: 42px; }}
+QToolButton#fontButton {{
+    background-color: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    color: {MUTED};
+    font-size: 13px;
+    padding: 0;
+}}
+QToolButton#fontButton:hover {{ background-color: {SURFACE_3}; color: {TEXT}; }}
+QToolButton#fontButton:disabled {{ color: {FAINT}; }}
 QFrame#kpiCard {{
     background-color: {SURFACE};
     border: 1px solid {BORDER_SOFT};
@@ -659,6 +682,14 @@ QMenu::item {{
 QMenu::item:selected {{ background-color: {ACCENT_SOFT}; }}
 QMenu::separator {{ height: 1px; background-color: {BORDER_SOFT}; margin: 4px 6px; }}
 QStatusBar {{ background-color: {SIDEBAR}; color: {FAINT}; border-top: 1px solid {BORDER_SOFT}; }}
+QLabel#toast {{
+    background-color: #1C2638;
+    color: {TEXT};
+    border: 1px solid #33435E;
+    border-radius: 9px;
+    padding: 8px 15px;
+    font-size: 11px;
+}}
 QScrollBar:vertical {{
     background: transparent;
     width: 9px;
@@ -696,6 +727,38 @@ QTabBar::tab:selected {{ color: {TEXT}; border-bottom-color: {ACCENT}; }}
 """
 
 
+def clamp_font_scale(value: float) -> float:
+    return max(MIN_FONT_SCALE, min(MAX_FONT_SCALE, round(float(value), 2)))
+
+
+def get_font_scale() -> float:
+    return _FONT_SCALE
+
+
+def font_px(value: float) -> int:
+    return max(1, int(round(float(value) * _FONT_SCALE)))
+
+
+_FONT_SIZE_RE = re.compile(r"font-size:\s*([0-9]+(?:\.[0-9]+)?)px")
+
+
+def _scaled_qss(qss: str) -> str:
+    return _FONT_SIZE_RE.sub(
+        lambda match: f"font-size: {font_px(float(match.group(1)))}px", qss
+    )
+
+
+def apply_font_scale(app: QApplication, scale: float) -> float:
+    """Apply the app-wide font scale to QSS and the ambient Qt font."""
+    global _FONT_SCALE
+    _FONT_SCALE = clamp_font_scale(scale)
+    font = QFont(app.font())
+    font.setPointSizeF(10.0 * _FONT_SCALE)
+    app.setFont(font)
+    app.setStyleSheet(_scaled_qss(QSS))
+    return _FONT_SCALE
+
+
 def apply_theme(app: QApplication) -> None:
     app.setStyle("Fusion")
     font = QFont("Microsoft YaHei UI")
@@ -718,7 +781,7 @@ def apply_theme(app: QApplication) -> None:
     palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(SURFACE_3))
     palette.setColor(QPalette.ColorRole.ToolTipText, QColor(TEXT))
     app.setPalette(palette)
-    app.setStyleSheet(QSS)
+    app.setStyleSheet(_scaled_qss(QSS))
 
 
 def enable_dark_title_bar(widget: QWidget) -> None:

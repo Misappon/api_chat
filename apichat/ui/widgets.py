@@ -24,7 +24,7 @@ from ..attachment_utils import format_bytes
 from ..models import Attachment
 from ..tokens import format_tokens, remaining_percent
 from .icons import icon
-from .theme import MUTED, percent_color
+from .theme import MUTED, font_px, percent_color
 
 
 class ElidedLabel(QLabel):
@@ -192,7 +192,7 @@ class ContextPill(QFrame):
         remaining = remaining_percent(used, window)
         self.value.setText(f"剩余 {remaining:.1f}%")
         color = percent_color(remaining)
-        self.value.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: 700;")
+        self.value.setStyleSheet(f"color: {color}; font-weight: 700;")
         self.bar.setValue(int(remaining * 10))
         state = "ok" if remaining >= 40 else "warn" if remaining >= 15 else "danger"
         self.bar.setProperty("state", state)
@@ -234,7 +234,7 @@ class ContextLine(QWidget):
         remaining = remaining_percent(used, window)
         self.label.setText(f"剩余 {remaining:.1f}%")
         color = percent_color(remaining)
-        self.label.setStyleSheet(f"color: {color}; font-size: 10px; font-weight: 600;")
+        self.label.setStyleSheet(f"color: {color}; font-weight: 600;")
         self.bar.setValue(int(remaining * 10))
         state = "ok" if remaining >= 40 else "warn" if remaining >= 15 else "danger"
         self.bar.setProperty("state", state)
@@ -246,16 +246,16 @@ class ContextLine(QWidget):
         )
 
 
-_MD_CSS = """
-body { color: #E8EDF7; font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: 13px; line-height: 1.62; }
+_MD_CSS_TEMPLATE = """
+body { color: #E8EDF7; font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: %(body)dpx; line-height: 1.62; }
 p { margin: 0 0 7px 0; }
 p:last-child { margin-bottom: 0; }
 h1, h2, h3, h4 { color: #F2F6FF; margin: 12px 0 6px 0; }
-h1 { font-size: 18px; } h2 { font-size: 16px; } h3 { font-size: 14px; } h4 { font-size: 13px; }
+h1 { font-size: %(h1)dpx; } h2 { font-size: %(h2)dpx; } h3 { font-size: %(h3)dpx; } h4 { font-size: %(h4)dpx; }
 ul, ol { margin: 4px 0 8px 0; padding-left: 22px; }
 li { margin: 2px 0; }
 code { font-family: "Cascadia Mono", Consolas, monospace; background-color: #0C121D;
-       color: #BFD0FF; font-size: 12px; padding: 1px 4px; }
+       color: #BFD0FF; font-size: %(code)dpx; padding: 1px 4px; }
 pre { background-color: #0A1019; border: 1px solid #26324A; padding: 10px;
       margin: 8px 0; white-space: pre-wrap; }
 pre code { background-color: transparent; color: #DCE6F8; padding: 0; }
@@ -267,6 +267,17 @@ th, td { border: 1px solid #2B3850; padding: 4px 8px; }
 th { background-color: #151E2C; color: #F0F4FC; }
 hr { border: none; border-top: 1px solid #26324A; margin: 10px 0; }
 """
+
+
+def _md_css() -> str:
+    return _MD_CSS_TEMPLATE % {
+        "body": font_px(13),
+        "h1": font_px(18),
+        "h2": font_px(16),
+        "h3": font_px(14),
+        "h4": font_px(13),
+        "code": font_px(12),
+    }
 
 
 class MarkdownView(QTextBrowser):
@@ -283,7 +294,7 @@ class MarkdownView(QTextBrowser):
         self.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.document().setDocumentMargin(0)
-        self.document().setDefaultStyleSheet(_MD_CSS)
+        self.document().setDefaultStyleSheet(_md_css())
         self._last_text = ""
         self._streaming = False
         self._last_width = 0
@@ -292,12 +303,16 @@ class MarkdownView(QTextBrowser):
     def set_markdown(self, text: str, *, streaming: bool = False) -> None:
         self._last_text = text or ""
         self._streaming = streaming
+        css = _md_css()
+        self.document().setDefaultStyleSheet(css)
+        inline_css = (
+            'background: transparent; border: none; color: #E8EDF7; '
+            'font-family: "Microsoft YaHei UI", "Segoe UI"; '
+            f'font-size: {font_px(13)}px;'
+        )
         if streaming:
             self.setPlainText(self._last_text)
-            self.setStyleSheet(
-                'background: transparent; border: none; color: #E8EDF7; '
-                'font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: 13px;'
-            )
+            self.setStyleSheet(inline_css)
         else:
             try:
                 escaped = html.escape(self._last_text, quote=False)
@@ -308,12 +323,12 @@ class MarkdownView(QTextBrowser):
                 )
             except Exception:
                 body = f"<p>{html.escape(self._last_text).replace(chr(10), '<br>')}</p>"
-            self.setHtml(f"<html><head><style>{_MD_CSS}</style></head><body>{body}</body></html>")
-            self.setStyleSheet(
-                'background: transparent; border: none; color: #E8EDF7; '
-                'font-family: "Microsoft YaHei UI", "Segoe UI"; font-size: 13px;'
-            )
+            self.setHtml(f"<html><head><style>{css}</style></head><body>{body}</body></html>")
+            self.setStyleSheet(inline_css)
         self._adjust_height()
+
+    def refresh_style(self) -> None:
+        self.set_markdown(self._last_text, streaming=self._streaming)
 
     def _adjust_height(self) -> None:
         width = self.viewport().width()
@@ -341,8 +356,7 @@ class Toast(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet(
             "QLabel#toast { background-color: #1C2638; color: #E8EDF7; "
-            "border: 1px solid #33435E; border-radius: 9px; padding: 8px 15px; "
-            "font-size: 11px; }"
+            "border: 1px solid #33435E; border-radius: 9px; padding: 8px 15px; }"
         )
         self.hide()
         self._timer = QTimer(self)

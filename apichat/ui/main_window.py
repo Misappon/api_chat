@@ -42,7 +42,14 @@ from .edit_dialog import EditMessageDialog
 from .import_dialog import ImportConversationDialog
 from .share_dialog import ShareDialog
 from .sidebar import Sidebar
-from .theme import FAINT, enable_dark_title_bar
+from .theme import (
+    DEFAULT_FONT_SCALE,
+    FAINT,
+    FONT_SCALE_STEP,
+    apply_font_scale,
+    clamp_font_scale,
+    enable_dark_title_bar,
+)
 from .widgets import Toast
 
 
@@ -64,15 +71,25 @@ class MainWindow(QMainWindow):
         self._cancel_event: Optional[threading.Event] = None
         self._stream_provider: Optional[Provider] = None
         self._stream_messages: list[dict] = []
+        self._stream_buffer = ""
         self._title_workers: dict[int, TitleWorker] = {}
         self._epoch = 0
         self.lan_server: Optional[LanShareServer] = None
         self._lan_bridge = _LanBridge(self)
         self._lan_bridge.changed.connect(self._on_lan_changed)
+        try:
+            saved_scale = float(self.config.get("font_scale", DEFAULT_FONT_SCALE))
+        except (TypeError, ValueError):
+            saved_scale = DEFAULT_FONT_SCALE
+        self._font_scale = clamp_font_scale(saved_scale)
+        app = QApplication.instance()
+        if app is not None:
+            self._font_scale = apply_font_scale(app, self._font_scale)
         self.setWindowTitle("API Chat · 本地 LLM 工作台")
         self.setWindowIcon(QApplication.windowIcon())
         self.setMinimumSize(1060, 700)
         self._build()
+        self.dashboard.set_font_scale(self._font_scale)
         self._install_shortcuts()
         self._restore_geometry()
         self._load_all(restore_last=True)
@@ -100,7 +117,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status)
         self.status.showMessage("就绪")
         self.db_status = QLabel(f"MySQL · {self.db.name}")
-        self.db_status.setStyleSheet(f"color: {FAINT}; font-size: 9px; padding-right: 8px;")
+        self.db_status.setStyleSheet(f"color: {FAINT}; padding-right: 8px;")
         self.status.addPermanentWidget(self.db_status)
         self.sidebar.set_database_name(self.db.name)
         self.dashboard.set_database_name(self.db.name)
@@ -141,6 +158,7 @@ class MainWindow(QMainWindow):
 
         self.dashboard.refresh_requested.connect(self.refresh_dashboard)
         self.dashboard.change_database_requested.connect(self.change_database)
+        self.dashboard.font_scale_changed.connect(self.set_font_scale)
         self.dashboard.open_conversation.connect(self._open_from_dashboard)
         self.dashboard.new_chat_requested.connect(self.new_conversation)
         self.dashboard.api_manager_requested.connect(self.open_api_manager)
@@ -150,6 +168,9 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+K"), self, self.sidebar.focus_search)
         QShortcut(QKeySequence("Ctrl+2"), self, self.open_dashboard)
         QShortcut(QKeySequence("Ctrl+1"), self, self._show_chat)
+        QShortcut(QKeySequence("Ctrl+Shift+="), self, self._increase_font)
+        QShortcut(QKeySequence("Ctrl+Shift++"), self, self._increase_font)
+        QShortcut(QKeySequence("Ctrl+Shift+-"), self, self._decrease_font)
 
     # ------------------------------------------------------------------
     # initial data
@@ -452,6 +473,7 @@ class MainWindow(QMainWindow):
             return
         self._stream_provider = provider
         self._stream_messages = messages
+        self._stream_buffer = ""
         self._cancel_event = threading.Event()
         worker = ChatStreamWorker(provider, messages, self._cancel_event, self)
         worker.delta.connect(self._on_delta)
@@ -484,7 +506,10 @@ class MainWindow(QMainWindow):
             self.chat_page.set_stream_status("正在停止…")
 
     def _on_delta(self, text: str) -> None:
-        self.chat_page.update_stream(text)
+        # LLM adapters emit deltas, not cumulative snapshots. Keep the full
+        # stream here so the streaming bubble never loses earlier tokens.
+        self._stream_buffer += text
+        self.chat_page.update_stream(self._stream_buffer)
 
     def _usage_for(self, provider: Provider, messages: list[dict], result: CompletionResult) -> tuple[int, int, int]:
         prompt = result.prompt_tokens or context_tokens(messages, provider.system_prompt)
@@ -613,6 +638,7 @@ class MainWindow(QMainWindow):
         self.chat_page.set_generating(False)
         self._stream_provider = None
         self._stream_messages = []
+        self._stream_buffer = ""
 
     def _on_chat_worker_finished(self, worker: ChatStreamWorker) -> None:
         if self._chat_worker is worker:
@@ -1113,6 +1139,28 @@ class MainWindow(QMainWindow):
 
     def current_id(self) -> Optional[int]:
         return self.current_conversation.id if self.current_conversation else None
+
+    def _increase_font(self) -> None:
+        self.set_font_scale(self._font_scale + FONT_SCALE_STEP)
+
+    def _decrease_font(self) -> None:
+        self.set_font_scale(self._font_scale - FONT_SCALE_STEP)
+
+    def set_font_scale(self, scale: float) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        new_scale = apply_font_scale(app, clamp_font_scale(scale))
+        if abs(new_scale - self._font_scale) < 0.001:
+            self.dashboard.set_font_scale(new_scale)
+            return
+        self._font_scale = new_scale
+        self.config.set("font_scale", new_scale, save=False)
+        self.config.save()
+        self.dashboard.set_font_scale(new_scale)
+        self.chat_page.refresh_markdown_styles()
+        self._reload_conversations()
+        self._set_status(f"全局字号 {int(round(new_scale * 100))}%")
 
     def _set_status(self, text: str) -> None:
         self.status.showMessage(text, 5000)

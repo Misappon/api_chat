@@ -21,6 +21,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "database": DEFAULT_DATABASE,
     "last_provider_id": None,
     "last_conversation_id": None,
+    "font_scale": 1.0,
     "window": {"width": 1320, "height": 860, "x": None, "y": None},
 }
 

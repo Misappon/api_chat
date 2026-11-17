@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -25,7 +26,17 @@ from PySide6.QtWidgets import (
 from ..models import ApiUsageRow, DashboardRow, DashboardTotals
 from ..tokens import format_tokens
 from .icons import icon
-from .theme import ACCENT, FAINT, MUTED, TEXT, full_time, percent_color
+from .theme import (
+    ACCENT,
+    FAINT,
+    FONT_SCALE_STEP,
+    MAX_FONT_SCALE,
+    MIN_FONT_SCALE,
+    MUTED,
+    TEXT,
+    full_time,
+    percent_color,
+)
 
 
 class NumericItem(QTableWidgetItem):
@@ -124,9 +135,11 @@ class DashboardPage(QWidget):
     open_conversation = Signal(int)
     new_chat_requested = Signal()
     api_manager_requested = Signal()
+    font_scale_changed = Signal(float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._font_scale = 1.0
         self._build()
 
     def _build(self) -> None:
@@ -154,6 +167,37 @@ class DashboardPage(QWidget):
         title_box.addWidget(self.subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
+
+        self.font_box = QFrame()
+        self.font_box.setObjectName("fontBox")
+        font_layout = QHBoxLayout(self.font_box)
+        font_layout.setContentsMargins(8, 4, 4, 4)
+        font_layout.setSpacing(5)
+        font_label = QLabel("字号")
+        font_label.setObjectName("fontLabel")
+        font_layout.addWidget(font_label)
+        self.font_down = QToolButton()
+        self.font_down.setObjectName("fontButton")
+        self.font_down.setText("−")
+        self.font_down.setToolTip("减小全局字号 (Ctrl+Shift+-)")
+        self.font_down.setFixedSize(25, 24)
+        self.font_down.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.font_down.clicked.connect(lambda: self._change_font(-FONT_SCALE_STEP))
+        font_layout.addWidget(self.font_down)
+        self.font_value = QLabel("100%")
+        self.font_value.setObjectName("fontValue")
+        self.font_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        font_layout.addWidget(self.font_value)
+        self.font_up = QToolButton()
+        self.font_up.setObjectName("fontButton")
+        self.font_up.setText("+")
+        self.font_up.setToolTip("增大全局字号 (Ctrl+Shift++)")
+        self.font_up.setFixedSize(25, 24)
+        self.font_up.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.font_up.clicked.connect(lambda: self._change_font(FONT_SCALE_STEP))
+        font_layout.addWidget(self.font_up)
+        header.addWidget(self.font_box)
+
         self.db_button = QPushButton("  切换数据库")
         self.db_button.setIcon(icon("database", MUTED, 15))
         self.db_button.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -377,6 +421,16 @@ class DashboardPage(QWidget):
         conversation_id = item.data(Qt.ItemDataRole.UserRole + 1)
         if conversation_id is not None:
             self.open_conversation.emit(int(conversation_id))
+
+    def _change_font(self, delta: float) -> None:
+        target = max(MIN_FONT_SCALE, min(MAX_FONT_SCALE, self._font_scale + delta))
+        self.font_scale_changed.emit(round(target, 2))
+
+    def set_font_scale(self, scale: float) -> None:
+        self._font_scale = max(MIN_FONT_SCALE, min(MAX_FONT_SCALE, scale))
+        self.font_value.setText(f"{int(round(self._font_scale * 100))}%")
+        self.font_down.setEnabled(self._font_scale > MIN_FONT_SCALE + 0.001)
+        self.font_up.setEnabled(self._font_scale < MAX_FONT_SCALE - 0.001)
 
     def set_database_name(self, name: str) -> None:
         self.db_button.setToolTip(f"当前数据库：{name}\n点击切换")

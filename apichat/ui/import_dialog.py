@@ -99,7 +99,7 @@ class ImportConversationDialog(QDialog):
         self.preview.setOpenExternalLinks(False)
         self.preview.setStyleSheet(
             "QTextBrowser { background: #0D131D; border: 1px solid #263044; "
-            "border-radius: 8px; padding: 8px; font-size: 11px; }"
+            "border-radius: 8px; padding: 8px; }"
         )
         body.addWidget(self.preview, 1)
         layout.addLayout(body, 1)

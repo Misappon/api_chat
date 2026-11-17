@@ -126,7 +126,7 @@ class AttachmentPreviewDialog(QDialog):
             editor.setPlainText(decode_text_bytes(self.attachment.data))
             editor.setStyleSheet(
                 "QPlainTextEdit { font-family: 'Cascadia Mono', Consolas, monospace; "
-                "font-size: 11px; background: #0D131D; border: 1px solid #263044; "
+                "background: #0D131D; border: 1px solid #263044; "
                 "border-radius: 8px; padding: 10px; }"
             )
             editor.setMinimumSize(720, 480)

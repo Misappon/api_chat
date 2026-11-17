@@ -37,7 +37,7 @@ from ..tokens import attachment_tokens_total, estimate_tokens, format_tokens
 from .icons import icon
 from .message_bubble import MessageBubble
 from .theme import FAINT, MUTED
-from .widgets import AttachmentChip, ContextPill, IconButton, Toast
+from .widgets import AttachmentChip, ContextPill, IconButton, MarkdownView, Toast
 
 
 class ComposerEdit(QPlainTextEdit):
@@ -55,6 +55,7 @@ class ComposerEdit(QPlainTextEdit):
         self.setTabChangesFocus(True)
         self.setAcceptDrops(True)
         self.document().setDocumentMargin(2)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(30)
         self.textChanged.connect(self._adjust_height)
 
@@ -89,8 +90,22 @@ class ComposerEdit(QPlainTextEdit):
         super().dropEvent(event)
 
     def _adjust_height(self) -> None:
-        height = int(self.document().size().height()) + 8
-        self.setFixedHeight(max(30, min(height, 150)))
+        line_height = self.fontMetrics().lineSpacing()
+        line_count = max(1, self.blockCount())
+        layout_height = int(self.document().documentLayout().documentSize().height())
+        height = max(
+            line_height * line_count + 10,
+            layout_height + 8,
+            30,
+        )
+        height = min(height, 150)
+        if self.height() != height:
+            self.setFixedHeight(height)
+            self.updateGeometry()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._adjust_height()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -187,7 +202,7 @@ class ChatPage(QWidget):
         self.manage_api_button = QPushButton("管理 API")
         self.manage_api_button.setObjectName("ghostButton")
         self.manage_api_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.manage_api_button.setStyleSheet(f"color: {MUTED}; font-size: 10px;")
+        self.manage_api_button.setStyleSheet(f"color: {MUTED};")
         self.manage_api_button.clicked.connect(self.api_manager_requested)
         controls.addWidget(self.manage_api_button)
         controls.addStretch(1)
@@ -358,7 +373,7 @@ class ChatPage(QWidget):
 
         self.disclaimer = QLabel("模型生成的内容可能不准确，请自行核验。")
         self.disclaimer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.disclaimer.setStyleSheet(f"color: {FAINT}; font-size: 9px;")
+        self.disclaimer.setStyleSheet(f"color: {FAINT};")
         bottom_layout.addWidget(self.disclaimer)
         layout.addWidget(self.bottom)
         self.bottom.hide()
@@ -647,6 +662,13 @@ class ChatPage(QWidget):
 
     def set_db_name(self, name: str) -> None:
         self.disclaimer.setToolTip(f"数据库：{name}")
+
+    def refresh_markdown_styles(self) -> None:
+        for view in self.findChildren(MarkdownView):
+            view.refresh_style()
+        self.edit._adjust_height()
+        self.composer.updateGeometry()
+        self._scroll_if_pinned()
 
     # ------------------------------------------------------------------
     # message rendering

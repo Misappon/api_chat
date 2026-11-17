@@ -425,7 +425,7 @@ class ApiManagerDialog(QDialog):
 
         self.empty_label = QLabel("还没有配置 API。\n点击下方「添加 API」开始连接你的第一个模型。")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_label.setStyleSheet(f"color: {FAINT}; font-size: 12px; line-height: 1.7;")
+        self.empty_label.setStyleSheet(f"color: {FAINT}; line-height: 1.7;")
         content.addWidget(self.empty_label, 1)
 
         buttons = QHBoxLayout()

@@ -132,7 +132,7 @@ class ShareDialog(QDialog):
             "仅在可信局域网使用。服务使用 HTTP 明文传输，不要在公共 Wi-Fi 下开启。"
         )
         warning.setWordWrap(True)
-        warning.setStyleSheet("color: #F2B84B; font-size: 10px;")
+        warning.setStyleSheet("color: #F2B84B;")
         body.addWidget(warning)
         note = QLabel("关闭此设置窗口不会停止共享；需要停止时请再次打开并点击“停止共享”。")
         note.setObjectName("helperText")

@@ -26,7 +26,7 @@ from .. import __version__
 from ..models import Conversation
 from ..tokens import estimate_tokens, format_tokens
 from .icons import icon
-from .theme import FAINT, MUTED, humanize_time
+from .theme import FAINT, MUTED, get_font_scale, humanize_time
 from .widgets import ContextLine, ElidedLabel, SectionTitle
 
 
@@ -206,7 +206,7 @@ class Sidebar(QFrame):
         self.empty_label = QLabel("还没有对话\n点击上方「新建对话」开始")
         self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty_label.setStyleSheet(
-            "color: #5E6B80; font-size: 11px; line-height: 1.6; padding: 8px;"
+            "color: #5E6B80; line-height: 1.6; padding: 8px;"
         )
         empty_layout.addWidget(self.empty_label)
         empty_layout.addStretch(1)
@@ -252,13 +252,13 @@ class Sidebar(QFrame):
         footer = QHBoxLayout()
         footer.setContentsMargins(2, 2, 2, 0)
         version = QLabel(f"v{__version__} · MySQL")
-        version.setStyleSheet(f"color: {FAINT}; font-size: 9px;")
+        version.setStyleSheet(f"color: {FAINT};")
         footer.addWidget(version)
         footer.addStretch(1)
         settings = QPushButton("设置")
         settings.setObjectName("ghostButton")
         settings.setCursor(Qt.CursorShape.PointingHandCursor)
-        settings.setStyleSheet(f"color: {FAINT}; font-size: 9px; border: none; padding: 2px;")
+        settings.setStyleSheet(f"color: {FAINT}; border: none; padding: 2px;")
         settings.clicked.connect(self.database_requested)
         footer.addWidget(settings)
         layout.addLayout(footer)
@@ -270,9 +270,10 @@ class Sidebar(QFrame):
         self.list.blockSignals(True)
         self.list.clear()
         self._cards.clear()
+        card_height = int(89 * max(1.0, get_font_scale()))
         for conversation in conversations:
             item = QListWidgetItem()
-            item.setSizeHint(QSize(0, 89))
+            item.setSizeHint(QSize(0, card_height))
             item.setData(Qt.ItemDataRole.UserRole, conversation.id)
             card = ConversationCard(conversation)
             self.list.addItem(item)
