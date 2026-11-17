@@ -164,6 +164,7 @@ class LanServerTests(unittest.TestCase):
             limits = client.get(self.base + "/api/limits?token=testtoken")
             self.assertEqual(limits.status_code, 200)
             self.assertGreater(limits.json()["image_mb"], 0)
+            self.assertGreater(limits.json()["pdf_mb"], 0)
             created = client.post(self.base + "/api/conversations?token=testtoken", json={})
             conversation_id = created.json()["conversation"]["id"]
             content = base64.b64encode("来自手机的附件".encode("utf-8")).decode("ascii")

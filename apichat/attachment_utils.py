@@ -3,43 +3,55 @@
 from __future__ import annotations
 
 import mimetypes
+from io import BytesIO
 from pathlib import Path
 
 from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PySide6.QtGui import QColor, QImage, QImageReader, QPainter
+from pypdf import PdfReader
 
 from .models import Attachment
 from .tokens import estimate_tokens
 
 DEFAULT_IMAGE_MB = 10
 DEFAULT_TEXT_MB = 2
+DEFAULT_PDF_MB = 20
 MAX_IMAGE_MB = 50
 MAX_TEXT_MB = 20
+MAX_PDF_MB = 50
 MAX_IMAGE_BYTES = DEFAULT_IMAGE_MB * 1024 * 1024
 MAX_TEXT_BYTES = DEFAULT_TEXT_MB * 1024 * 1024
+MAX_PDF_BYTES = DEFAULT_PDF_MB * 1024 * 1024
 MAX_ATTACHMENTS = 6
 THUMBNAIL_MAX = 480
 
 
-def apply_attachment_limits(image_mb: float, text_mb: float) -> None:
+def apply_attachment_limits(image_mb: float, text_mb: float, pdf_mb: float | None = None) -> None:
     """Update the per-file limits used by desktop and LAN uploads."""
-    global MAX_IMAGE_BYTES, MAX_TEXT_BYTES
+    global MAX_IMAGE_BYTES, MAX_TEXT_BYTES, MAX_PDF_BYTES
     image_value = max(1, min(MAX_IMAGE_MB, int(image_mb)))
     text_value = max(1, min(MAX_TEXT_MB, int(text_mb)))
+    pdf_value = max(1, min(MAX_PDF_MB, int(pdf_mb if pdf_mb is not None else DEFAULT_PDF_MB)))
     MAX_IMAGE_BYTES = image_value * 1024 * 1024
     MAX_TEXT_BYTES = text_value * 1024 * 1024
+    MAX_PDF_BYTES = pdf_value * 1024 * 1024
 
 
 def attachment_limits_mb() -> tuple[int, int]:
     return MAX_IMAGE_BYTES // (1024 * 1024), MAX_TEXT_BYTES // (1024 * 1024)
 
 
+def pdf_limit_mb() -> int:
+    return MAX_PDF_BYTES // (1024 * 1024)
+
+
 def max_request_bytes() -> int:
     # Base64 expands binary by 4/3; leave room for JSON and long prompts.
-    binary = (MAX_IMAGE_BYTES + MAX_TEXT_BYTES) * MAX_ATTACHMENTS
-    return min(160 * 1024 * 1024, int(binary * 1.4) + 2 * 1024 * 1024)
+    binary = (MAX_IMAGE_BYTES + MAX_TEXT_BYTES + MAX_PDF_BYTES) * MAX_ATTACHMENTS
+    return min(240 * 1024 * 1024, int(binary * 1.4) + 2 * 1024 * 1024)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+PDF_EXTENSIONS = {".pdf"}
 TEXT_EXTENSIONS = {
     ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".xml",
     ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".log", ".html", ".htm",
@@ -70,6 +82,37 @@ def format_bytes(value: int) -> str:
     if value >= 1024:
         return f"{value / 1024:.0f} KB"
     return f"{value} B"
+
+
+def extract_pdf_text(data: bytes) -> str:
+    """Extract readable text from a PDF; scanned image-only PDFs return empty."""
+    if not data:
+        return ""
+    if len(data) > MAX_PDF_BYTES:
+        raise AttachmentError(f"PDF 超过 {format_bytes(MAX_PDF_BYTES)}")
+    try:
+        reader = PdfReader(BytesIO(data))
+        if reader.is_encrypted:
+            try:
+                if not reader.decrypt(""):
+                    raise AttachmentError("PDF 已加密，无法读取文本。")
+            except AttachmentError:
+                raise
+            except Exception as exc:
+                raise AttachmentError("PDF 已加密，无法读取文本。") from exc
+        pages: list[str] = []
+        for page in reader.pages:
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
+            if text.strip():
+                pages.append(text.strip())
+        return "\n\n".join(pages).strip()
+    except AttachmentError:
+        raise
+    except Exception as exc:
+        raise AttachmentError(f"无法解析 PDF：{exc}") from exc
 
 
 def _thumbnail_bytes(image: QImage) -> tuple[bytes, int, int]:
@@ -120,6 +163,18 @@ def prepare_attachment(attachment: Attachment) -> Attachment:
         attachment.mime_type = attachment.mime_type or "text/plain"
         attachment.token_count = attachment.token_count or (estimate_tokens(text) + 4)
         return attachment
+    if attachment.kind == "pdf":
+        if len(attachment.data) > MAX_PDF_BYTES:
+            raise AttachmentError(f"PDF 超过 {format_bytes(MAX_PDF_BYTES)}：{attachment.filename}")
+        text = extract_pdf_text(attachment.data)
+        if not text:
+            raise AttachmentError(
+                f"PDF 中没有可提取的文本（可能是扫描件）：{attachment.filename}"
+            )
+        attachment.size_bytes = len(attachment.data)
+        attachment.mime_type = "application/pdf"
+        attachment.token_count = attachment.token_count or (estimate_tokens(text) + 4)
+        return attachment
     raise AttachmentError(f"不支持的附件类型：{attachment.filename}")
 
 
@@ -155,6 +210,17 @@ def attachment_from_bytes(
             height=image.height(),
         )
         return prepare_attachment(attachment)
+    if extension in PDF_EXTENSIONS or mime_type == "application/pdf":
+        if len(data) > MAX_PDF_BYTES:
+            raise AttachmentError(f"PDF 超过 {format_bytes(MAX_PDF_BYTES)}：{name}")
+        attachment = Attachment(
+            filename=name,
+            mime_type="application/pdf",
+            kind="pdf",
+            size_bytes=len(data),
+            data=data,
+        )
+        return prepare_attachment(attachment)
     if extension in TEXT_EXTENSIONS or mime_type.startswith("text/"):
         if len(data) > MAX_TEXT_BYTES:
             raise AttachmentError(f"文本附件超过 {format_bytes(MAX_TEXT_BYTES)}：{name}")
@@ -177,7 +243,7 @@ def attachment_from_path(path: str | Path) -> Attachment:
     if not file_path.is_file():
         raise AttachmentError(f"文件不存在：{file_path}")
     size = file_path.stat().st_size
-    largest = max(MAX_IMAGE_BYTES, MAX_TEXT_BYTES)
+    largest = max(MAX_IMAGE_BYTES, MAX_TEXT_BYTES, MAX_PDF_BYTES)
     if size > largest:
         raise AttachmentError(f"文件超过 {format_bytes(largest)}：{file_path.name}")
     data = file_path.read_bytes()
@@ -195,6 +261,11 @@ def image_attachment_from_qimage(image: QImage, filename: str = "粘贴的图片
 
 
 def attachment_text_content(attachment: Attachment) -> str:
-    if attachment.kind != "text":
-        return ""
-    return decode_text_bytes(attachment.data)
+    if attachment.kind == "text":
+        return decode_text_bytes(attachment.data)
+    if attachment.kind == "pdf":
+        try:
+            return extract_pdf_text(attachment.data)
+        except AttachmentError:
+            return ""
+    return ""

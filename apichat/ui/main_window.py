@@ -26,6 +26,7 @@ from ..attachment_utils import (
     AttachmentError,
     apply_attachment_limits,
     attachment_limits_mb,
+    pdf_limit_mb,
     prepare_attachment,
 )
 from ..config import Config
@@ -90,9 +91,10 @@ class MainWindow(QMainWindow):
         try:
             image_mb = int(self.config.get("attachment_image_mb", 10))
             text_mb = int(self.config.get("attachment_text_mb", 2))
+            pdf_mb = int(self.config.get("attachment_pdf_mb", 20))
         except (TypeError, ValueError):
-            image_mb, text_mb = 10, 2
-        apply_attachment_limits(image_mb, text_mb)
+            image_mb, text_mb, pdf_mb = 10, 2, 20
+        apply_attachment_limits(image_mb, text_mb, pdf_mb)
         app = QApplication.instance()
         if app is not None:
             self._font_scale = apply_font_scale(app, self._font_scale)
@@ -101,7 +103,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1060, 700)
         self._build()
         self.dashboard.set_font_scale(self._font_scale)
-        self.dashboard.set_attachment_limits(*attachment_limits_mb())
+        self.dashboard.set_attachment_limits(*attachment_limits_mb(), pdf_limit_mb())
         self._install_shortcuts()
         self._restore_geometry()
         self._load_all(restore_last=True)
@@ -1175,14 +1177,18 @@ class MainWindow(QMainWindow):
         self._reload_conversations()
         self._set_status(f"全局字号 {int(round(new_scale * 100))}%")
 
-    def set_attachment_limits(self, image_mb: int, text_mb: int) -> None:
-        apply_attachment_limits(image_mb, text_mb)
+    def set_attachment_limits(self, image_mb: int, text_mb: int, pdf_mb: int) -> None:
+        apply_attachment_limits(image_mb, text_mb, pdf_mb)
         actual_image, actual_text = attachment_limits_mb()
+        actual_pdf = pdf_limit_mb()
         self.config.set("attachment_image_mb", actual_image, save=False)
         self.config.set("attachment_text_mb", actual_text, save=False)
+        self.config.set("attachment_pdf_mb", actual_pdf, save=False)
         self.config.save()
-        self.dashboard.set_attachment_limits(actual_image, actual_text)
-        self._set_status(f"附件上限：图片 {actual_image} MB / 文本 {actual_text} MB")
+        self.dashboard.set_attachment_limits(actual_image, actual_text, actual_pdf)
+        self._set_status(
+            f"附件上限：图片 {actual_image} MB / 文本 {actual_text} MB / PDF {actual_pdf} MB"
+        )
 
     def _set_status(self, text: str) -> None:
         self.status.showMessage(text, 5000)

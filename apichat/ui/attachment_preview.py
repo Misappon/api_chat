@@ -21,7 +21,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..attachment_utils import decode_text_bytes, format_bytes
+from ..attachment_utils import (
+    AttachmentError,
+    attachment_text_content,
+    decode_text_bytes,
+    format_bytes,
+)
 from ..models import Attachment
 from .icons import icon
 from .theme import MUTED, enable_dark_title_bar
@@ -123,7 +128,16 @@ class AttachmentPreviewDialog(QDialog):
         else:
             editor = QPlainTextEdit()
             editor.setReadOnly(True)
-            editor.setPlainText(decode_text_bytes(self.attachment.data))
+            if self.attachment.kind == "pdf":
+                try:
+                    text = attachment_text_content(self.attachment)
+                except AttachmentError as exc:
+                    text = f"无法提取 PDF 文本：{exc}"
+                if not text:
+                    text = "该 PDF 没有可提取的文本（可能是扫描件）。\n仍可点击“保存附件”保存原文件。"
+                editor.setPlainText(text)
+            else:
+                editor.setPlainText(decode_text_bytes(self.attachment.data))
             editor.setStyleSheet(
                 "QPlainTextEdit { font-family: 'Cascadia Mono', Consolas, monospace; "
                 "background: #0D131D; border: 1px solid #263044; "

@@ -10,6 +10,7 @@ from urllib.parse import quote
 
 import httpx
 
+from .attachment_utils import AttachmentError, extract_pdf_text
 from .models import CompletionResult, Provider
 from .tokens import content_text, context_tokens, estimate_tokens
 
@@ -177,8 +178,18 @@ def _attachment_parts(attachments: Iterable) -> tuple[str, list]:
         if kind == "image":
             if data:
                 images.append((attachment, mime_type or "image/png", data))
-        elif kind == "text":
-            text = _decode_attachment_text(data) if isinstance(data, (bytes, bytearray)) else str(data)
+        elif kind in ("text", "pdf"):
+            if kind == "pdf":
+                try:
+                    text = extract_pdf_text(data) if isinstance(data, (bytes, bytearray)) else ""
+                except AttachmentError:
+                    text = ""
+            else:
+                text = (
+                    _decode_attachment_text(data)
+                    if isinstance(data, (bytes, bytearray))
+                    else str(data)
+                )
             if text:
                 if len(text) > 120_000:
                     text = text[:120_000] + "\n\n[附件内容已截断]"

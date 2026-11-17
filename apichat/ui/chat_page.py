@@ -354,7 +354,7 @@ class ChatPage(QWidget):
         composer_footer.setContentsMargins(2, 0, 1, 0)
         composer_footer.setSpacing(6)
         self.attach_button = IconButton(
-            "paperclip", tooltip="添加图片或文本附件（也可拖入、粘贴图片）", size=16
+            "paperclip", tooltip="添加图片、PDF 或文本附件（也可拖入、粘贴图片）", size=16
         )
         self.attach_button.clicked.connect(self.choose_attachments)
         composer_footer.addWidget(self.attach_button)
@@ -433,6 +433,7 @@ class ChatPage(QWidget):
             "添加附件",
             "",
             "图片 (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+            "PDF (*.pdf);;"
             "文本与代码 (*.txt *.md *.py *.js *.ts *.json *.csv *.html *.css "
             "*.yaml *.yml *.xml *.sql *.log);;所有文件 (*.*)",
         )

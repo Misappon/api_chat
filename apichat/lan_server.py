@@ -25,6 +25,7 @@ from .attachment_utils import (
     attachment_from_bytes,
     attachment_limits_mb,
     max_request_bytes,
+    pdf_limit_mb,
 )
 from .db import Database
 from .llm import LLMClient
@@ -310,6 +311,7 @@ class _Handler(BaseHTTPRequestHandler):
             {
                 "image_mb": image_mb,
                 "text_mb": text_mb,
+                "pdf_mb": pdf_limit_mb(),
                 "max_attachments": MAX_ATTACHMENTS,
             }
         )
@@ -735,7 +737,7 @@ background:#261720;border:1px solid #5a293b;color:#ffadb7;font-size:11px;display
     <div class="draft" id="draftAttachments"></div>
     <div class="composer-inner">
      <button class="attach" id="attachBtn" title="添加图片或文本附件">📎</button>
-     <input type="file" id="fileInput" multiple hidden accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.java,.kt,.c,.h,.cpp,.cc,.hpp,.cs,.go,.rs,.rb,.php,.swift,.sql,.sh,.bash,.bat,.cmd,.ps1,.vue,.svelte,.lua,.r,.m,.mm">
+     <input type="file" id="fileInput" multiple hidden accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,application/pdf,.pdf,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.java,.kt,.c,.h,.cpp,.cc,.hpp,.cs,.go,.rs,.rb,.php,.swift,.sql,.sh,.bash,.bat,.cmd,.ps1,.vue,.svelte,.lua,.r,.m,.mm">
      <textarea id="input" rows="1" placeholder="输入消息…"></textarea>
      <button class="send" id="sendBtn">➤</button>
     </div>
@@ -751,7 +753,7 @@ let conversations = [];
 let currentId = null;
 let busy = false;
 let draftAttachments = [];
-let limits = {image_mb: 10, text_mb: 2, max_attachments: 6};
+let limits = {image_mb: 10, text_mb: 2, pdf_mb: 20, max_attachments: 6};
 function esc(v){return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(path, options={}){
   const sep = path.includes('?') ? '&' : '?';
@@ -769,6 +771,9 @@ function isImageFile(file){
   return ['image/png','image/jpeg','image/webp','image/gif','image/bmp'].includes(file.type)
     || ['png','jpg','jpeg','webp','gif','bmp'].includes(ext);
 }
+function isPdfFile(file){
+  return file.type==='application/pdf' || (file.name.split('.').pop()||'').toLowerCase()==='pdf';
+}
 function renderDraft(){
   const box=$('draftAttachments');
   box.innerHTML=draftAttachments.map((a,i)=>
@@ -777,8 +782,8 @@ function renderDraft(){
   box.querySelectorAll('button[data-index]').forEach(btn=>btn.onclick=()=>{
     draftAttachments.splice(Number(btn.dataset.index),1); renderDraft();
   });
-  $('attachBtn').title=`添加附件（最多 ${limits.max_attachments} 个；图片 ${limits.image_mb} MB，文本 ${limits.text_mb} MB）`;
-  $('attachHint').textContent=`图片≤${limits.image_mb}MB · 文本≤${limits.text_mb}MB · 最多${limits.max_attachments}个`;
+  $('attachBtn').title=`添加附件（最多 ${limits.max_attachments} 个；图片 ${limits.image_mb} MB，文本 ${limits.text_mb} MB，PDF ${limits.pdf_mb} MB）`;
+  $('attachHint').textContent=`图片≤${limits.image_mb}MB · 文本≤${limits.text_mb}MB · PDF≤${limits.pdf_mb}MB · 最多${limits.max_attachments}个`;
 }
 function readDataUrl(file){
   return new Promise((resolve,reject)=>{
@@ -797,7 +802,7 @@ async function addFiles(files){
       errors.push(`每条消息最多 ${limits.max_attachments} 个附件`); break;
     }
     const image=isImageFile(file);
-    const maxMb=image?limits.image_mb:limits.text_mb;
+    const maxMb=image?limits.image_mb:(isPdfFile(file)?limits.pdf_mb:limits.text_mb);
     if(file.size>maxMb*1024*1024){
       errors.push(`${file.name} 超过 ${maxMb} MB`); continue;
     }

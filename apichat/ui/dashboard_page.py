@@ -137,7 +137,7 @@ class DashboardPage(QWidget):
     new_chat_requested = Signal()
     api_manager_requested = Signal()
     font_scale_changed = Signal(float)
-    attachment_limits_changed = Signal(int, int)
+    attachment_limits_changed = Signal(int, int, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -241,6 +241,15 @@ class DashboardPage(QWidget):
         self.text_limit_spin.setSuffix(" MB")
         self.text_limit_spin.setToolTip("单个文本/代码文件的最大上传大小")
         limit_layout.addWidget(self.text_limit_spin)
+        limit_layout.addSpacing(8)
+        limit_layout.addWidget(QLabel("PDF"))
+        self.pdf_limit_spin = QSpinBox()
+        self.pdf_limit_spin.setObjectName("limitSpin")
+        self.pdf_limit_spin.setRange(1, 50)
+        self.pdf_limit_spin.setValue(20)
+        self.pdf_limit_spin.setSuffix(" MB")
+        self.pdf_limit_spin.setToolTip("单个 PDF 文件的最大上传大小")
+        limit_layout.addWidget(self.pdf_limit_spin)
         limit_layout.addStretch(1)
         limit_note = QLabel("对桌面端和手机网页端同时生效")
         limit_note.setObjectName("limitHint")
@@ -248,6 +257,7 @@ class DashboardPage(QWidget):
         layout.addWidget(limit_box)
         self.image_limit_spin.valueChanged.connect(self._emit_attachment_limits)
         self.text_limit_spin.valueChanged.connect(self._emit_attachment_limits)
+        self.pdf_limit_spin.valueChanged.connect(self._emit_attachment_limits)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -467,16 +477,21 @@ class DashboardPage(QWidget):
 
     def _emit_attachment_limits(self) -> None:
         self.attachment_limits_changed.emit(
-            self.image_limit_spin.value(), self.text_limit_spin.value()
+            self.image_limit_spin.value(),
+            self.text_limit_spin.value(),
+            self.pdf_limit_spin.value(),
         )
 
-    def set_attachment_limits(self, image_mb: int, text_mb: int) -> None:
+    def set_attachment_limits(self, image_mb: int, text_mb: int, pdf_mb: int) -> None:
         self.image_limit_spin.blockSignals(True)
         self.text_limit_spin.blockSignals(True)
+        self.pdf_limit_spin.blockSignals(True)
         self.image_limit_spin.setValue(max(1, min(50, int(image_mb))))
         self.text_limit_spin.setValue(max(1, min(20, int(text_mb))))
+        self.pdf_limit_spin.setValue(max(1, min(50, int(pdf_mb))))
         self.image_limit_spin.blockSignals(False)
         self.text_limit_spin.blockSignals(False)
+        self.pdf_limit_spin.blockSignals(False)
 
     def set_font_scale(self, scale: float) -> None:
         self._font_scale = max(MIN_FONT_SCALE, min(MAX_FONT_SCALE, scale))
