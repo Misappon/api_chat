@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..models import Conversation
 from ..tokens import estimate_tokens, format_tokens
 from .icons import icon
@@ -250,7 +251,7 @@ class Sidebar(QFrame):
 
         footer = QHBoxLayout()
         footer.setContentsMargins(2, 2, 2, 0)
-        version = QLabel("v1.0 · MySQL")
+        version = QLabel(f"v{__version__} · MySQL")
         version.setStyleSheet(f"color: {FAINT}; font-size: 9px;")
         footer.addWidget(version)
         footer.addStretch(1)

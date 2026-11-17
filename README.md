@@ -253,7 +253,7 @@ python -m unittest discover -s tests -v
 - `tests/test_llm.py` 启动本地假 HTTP 服务，测试 OpenAI SSE、Anthropic Messages、Gemini generateContent、多模态 payload 和错误信息，不需要真实 API Key。
 - `tests/test_importer.py` 覆盖 ChatGPT JSON、Claude JSON、DOM、文本兜底、HTML 图片和导出格式。
 - `tests/test_lan_server.py` 覆盖访问码、移动端页面、对话列表、附件下载、新建对话和手机端发送消息。
-- 当前共 22 个测试。
+- 当前共 23 个测试。
 - 可选的演示数据：
 
   ```powershell
