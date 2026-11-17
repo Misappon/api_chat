@@ -316,6 +316,27 @@ conda create -n apichat python=3.11 -y --offline
 
 若本机缓存里没有 Python 3.11，可改用镜像源，或在已能联网的环境创建后迁移。
 
+**程序卡顿，任务栏/资源管理器也失去响应**
+
+从 v1.4.1 起做了两处隔离：
+
+- 文件选择/保存默认使用 Qt 内置对话框，不再调用 Windows Shell 的文件对话框，避免第三方 Shell 扩展把资源管理器一起拖死。
+- 默认使用软件渲染，避免 Qt 的 D3D 初始化与部分显卡/虚拟显示器驱动冲突；如确认需要硬件渲染，可在启动前设置环境变量 `QT_OPENGL=desktop`。
+
+排查步骤：
+
+1. 查看 `%APPDATA%\APIChat\app.log`，搜索 `UI thread blocked`。出现该记录时，日志会附带主线程调用栈，可定位是哪一步阻塞。
+2. 查看 `%APPDATA%\APIChat\crash.log`，这是 Qt/Python 原生崩溃日志，和 `app.log` 一起反馈。
+3. 如果 Windows 事件查看器同时出现 `ShellExperienceHost.exe` 或 `explorer.exe` 挂起，优先更新/回滚显卡驱动，并且临时禁用虚拟显示器驱动（部分远程桌面、投屏软件会安装此类驱动），再观察是否只在使用本程序时复现。
+4. 以管理员身份运行：
+
+   ```powershell
+   sfc /scannow
+   DISM /Online /Cleanup-Image /RestoreHealth
+   ```
+
+5. 如果问题只在打开文件选择框后出现，确认使用的是 v1.4.1 或更高版本；旧版本会走 Windows 原生对话框。
+
 **401 / 403 / 404**
 
 - 401：检查 API Key 是否有效。

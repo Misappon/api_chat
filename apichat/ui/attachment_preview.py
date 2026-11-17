@@ -149,7 +149,11 @@ class AttachmentPreviewDialog(QDialog):
     def _save(self) -> None:
         default_name = self.attachment.filename or "attachment"
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存附件", str(Path.home() / default_name), "所有文件 (*.*)"
+            self,
+            "保存附件",
+            str(Path.home() / default_name),
+            "所有文件 (*.*)",
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path:
             return

@@ -3,13 +3,27 @@
 from __future__ import annotations
 
 import ctypes
+import faulthandler
+import io
 import logging
+import os
 import sys
+import threading
+import time
 import traceback
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+# Keep the 2D UI on the software raster path. On a few Windows 11 + virtual
+# display/GPU driver combinations Qt's D3D initialization can interact badly
+# with the shell compositor. These flags must be set before importing Qt.
+_SOFTWARE_RENDERING = os.environ.get("QT_OPENGL", "").lower() != "desktop"
+if _SOFTWARE_RENDERING:
+    os.environ.setdefault("QT_OPENGL", "software")
+    os.environ.setdefault("QT_QUICK_BACKEND", "software")
+    os.environ.setdefault("QSG_RHI_BACKEND", "software")
+
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -23,6 +37,34 @@ from apichat.ui.main_window import MainWindow
 from apichat.ui.theme import apply_theme
 
 LOG = logging.getLogger("apichat")
+_CRASH_FILE = None
+
+
+class _UiWatchdog(threading.Thread):
+    """Log a stack dump when the Qt event loop stops responding."""
+
+    def __init__(self) -> None:
+        super().__init__(name="apichat-ui-watchdog", daemon=True)
+        self._last_beat = time.monotonic()
+        self._main_ident = threading.main_thread().ident
+        self._warned = False
+
+    def beat(self) -> None:
+        self._last_beat = time.monotonic()
+        self._warned = False
+
+    def run(self) -> None:
+        while True:
+            time.sleep(1.0)
+            blocked = time.monotonic() - self._last_beat
+            if blocked < 10.0 or self._warned:
+                continue
+            self._warned = True
+            frame = sys._current_frames().get(self._main_ident)
+            output = io.StringIO()
+            if frame is not None:
+                traceback.print_stack(frame, file=output)
+            LOG.warning("UI thread blocked for %.1fs\n%s", blocked, output.getvalue())
 
 
 def setup_logging() -> None:
@@ -86,7 +128,15 @@ def connect_with_dialog(config: Config) -> Database | None:
 
 
 def main() -> int:
+    global _CRASH_FILE
     setup_logging()
+    try:
+        _CRASH_FILE = open(
+            app_data_dir() / "crash.log", "a", buffering=1, encoding="utf-8"
+        )
+        faulthandler.enable(file=_CRASH_FILE, all_threads=True)
+    except Exception:
+        _CRASH_FILE = None
     if sys.platform == "win32":
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
@@ -95,10 +145,21 @@ def main() -> int:
         except Exception:
             pass
 
+    if _SOFTWARE_RENDERING:
+        try:
+            QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseSoftwareOpenGL, True)
+        except Exception:
+            pass
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
     )
     app = QApplication(sys.argv)
+    watchdog = _UiWatchdog()
+    watchdog.start()
+    heartbeat = QTimer()
+    heartbeat.setInterval(500)
+    heartbeat.timeout.connect(watchdog.beat)
+    heartbeat.start()
     app.setApplicationName("API Chat")
     app.setApplicationDisplayName("API Chat")
     app.setOrganizationName("APIChat")

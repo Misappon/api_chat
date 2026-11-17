@@ -195,7 +195,11 @@ class ImportConversationDialog(QDialog):
 
     def _browse(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择 HTML 文件", "", "HTML 文件 (*.html *.htm);;所有文件 (*.*)"
+            self,
+            "选择 HTML 文件",
+            "",
+            "HTML 文件 (*.html *.htm);;所有文件 (*.*)",
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
             self.file_edit.setText(path)

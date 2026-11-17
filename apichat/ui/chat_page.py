@@ -436,6 +436,7 @@ class ChatPage(QWidget):
             "PDF (*.pdf);;"
             "文本与代码 (*.txt *.md *.py *.js *.ts *.json *.csv *.html *.css "
             "*.yaml *.yml *.xml *.sql *.log);;所有文件 (*.*)",
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if paths:
             self.add_attachment_paths(paths)

@@ -959,6 +959,7 @@ class MainWindow(QMainWindow):
             "导出对话",
             str(default_path),
             "文本文件 (*.txt);;Markdown 文件 (*.md);;所有文件 (*.*)",
+            options=QFileDialog.Option.DontUseNativeDialog,
         )
         if not path:
             return
