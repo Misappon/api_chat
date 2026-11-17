@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import html
 import hmac
 import json
@@ -17,13 +19,19 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import markdown
 
+from .attachment_utils import (
+    MAX_ATTACHMENTS,
+    AttachmentError,
+    attachment_from_bytes,
+    attachment_limits_mb,
+    max_request_bytes,
+)
 from .db import Database
 from .llm import LLMClient
 from .models import Conversation, Message
 from .repository import Repository
 from .tokens import context_tokens, estimate_tokens
 
-MAX_REQUEST_BYTES = 64 * 1024
 MAX_MESSAGE_CHARS = 20_000
 
 
@@ -213,6 +221,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/conversations":
                 self._handle_list_conversations()
+            elif path == "/api/limits":
+                self._handle_limits()
             elif path.startswith("/api/conversations/"):
                 self._handle_get_conversation(path)
             elif path.startswith("/api/attachments/"):
@@ -235,6 +245,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_send_message(path, body)
             else:
                 self._send_json({"error": "not found"}, 404)
+        except LanServerError as exc:
+            self._send_json({"error": str(exc)}, 400)
         except Exception as exc:
             self._send_json({"error": f"服务端错误：{exc}"}, 500)
 
@@ -249,7 +261,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or 0)
-        if length > MAX_REQUEST_BYTES:
+        if length > max_request_bytes():
             raise LanServerError("请求过大")
         raw = self.rfile.read(length) if length else b"{}"
         try:
@@ -291,6 +303,16 @@ class _Handler(BaseHTTPRequestHandler):
         config = self.share.db_config_getter()
         db = Database(config).connect(create_database=False)
         return db, Repository(db)
+
+    def _handle_limits(self) -> None:
+        image_mb, text_mb = attachment_limits_mb()
+        self._send_json(
+            {
+                "image_mb": image_mb,
+                "text_mb": text_mb,
+                "max_attachments": MAX_ATTACHMENTS,
+            }
+        )
 
     def _handle_list_conversations(self) -> None:
         db, repo = self._repo()
@@ -379,10 +401,43 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             db.close()
 
+    def _decode_attachments(self, raw: Any) -> list:
+        if raw in (None, ""):
+            return []
+        if not isinstance(raw, list):
+            raise LanServerError("附件格式错误")
+        if len(raw) > MAX_ATTACHMENTS:
+            raise LanServerError(f"每条消息最多 {MAX_ATTACHMENTS} 个附件")
+        attachments = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise LanServerError("附件格式错误")
+            filename = str(item.get("filename") or "attachment")
+            mime_type = str(item.get("mime_type") or "")
+            encoded = str(item.get("data") or "")
+            if not encoded:
+                raise LanServerError(f"附件内容为空：{filename}")
+            try:
+                data = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise LanServerError(f"附件编码错误：{filename}") from exc
+            try:
+                attachments.append(
+                    attachment_from_bytes(data, filename, mime_type=mime_type)
+                )
+            except AttachmentError as exc:
+                raise LanServerError(str(exc)) from exc
+        return attachments
+
     def _handle_send_message(self, path: str, body: dict) -> None:
         conversation_id = self._conversation_id(path.replace("/messages", ""))
+        try:
+            attachments = self._decode_attachments(body.get("attachments"))
+        except LanServerError as exc:
+            self._send_json({"error": str(exc)}, 400)
+            return
         content = str(body.get("content") or "").strip()
-        if not content:
+        if not content and not attachments:
             self._send_json({"error": "消息不能为空"}, 400)
             return
         if len(content) > MAX_MESSAGE_CHARS:
@@ -401,7 +456,13 @@ class _Handler(BaseHTTPRequestHandler):
             if provider is None:
                 self._send_json({"error": "该对话没有可用 API，请先在电脑端配置。"}, 409)
                 return
-            repo.add_message(conversation_id, "user", content, model=provider.model)
+            repo.add_message(
+                conversation_id,
+                "user",
+                content,
+                model=provider.model,
+                attachments=attachments,
+            )
             messages = repo.api_messages(conversation_id)
             try:
                 result = LLMClient(provider).complete(messages)
@@ -625,10 +686,21 @@ background:#171f2d;border:1px solid #263044;color:var(--muted);font-size:10px;te
 .empty{text-align:center;color:var(--faint);padding:60px 20px;font-size:13px;line-height:1.8}
 .composer{flex:0 0 auto;padding:8px 10px calc(8px + env(safe-area-inset-bottom));
 border-top:1px solid #1b2331;background:var(--bg)}
-.composer-inner{max-width:840px;margin:auto;display:flex;gap:8px;align-items:flex-end;
-background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:7px 7px 7px 12px}
+.draft{max-width:840px;margin:0 auto 7px;display:flex;gap:6px;overflow-x:auto;padding-bottom:2px}
+.draft:empty{display:none}
+.chip{flex:0 0 auto;max-width:170px;display:flex;align-items:center;gap:5px;padding:4px 6px;
+border-radius:7px;background:#171f2d;border:1px solid #263044;color:var(--muted);font-size:10px}
+.chip img{width:28px;height:28px;object-fit:cover;border-radius:5px}
+.chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chip button{border:0;background:transparent;color:var(--faint);font-size:15px;line-height:1;padding:0 2px}
+.composer-inner{max-width:840px;margin:auto;display:flex;gap:6px;align-items:flex-end;
+background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:7px}
+.attach{width:38px;height:38px;border:0;border-radius:50%;background:transparent;color:var(--muted);
+font-size:20px;display:grid;place-items:center;flex:0 0 38px}
+.attach:disabled{opacity:.4}
 textarea{flex:1;resize:none;border:0;background:transparent;color:var(--text);
 font:inherit;font-size:14px;line-height:1.5;max-height:120px;min-height:24px;outline:none;padding:5px 0}
+.attach-hint{max-width:840px;margin:5px auto 0;color:var(--faint);font-size:9px;text-align:right}
 .send{width:38px;height:38px;border:0;border-radius:50%;background:var(--accent);color:#fff;
 font-size:19px;display:grid;place-items:center;flex:0 0 38px}
 .send:disabled{background:#273145;color:#66738a}
@@ -660,10 +732,14 @@ background:#261720;border:1px solid #5a293b;color:#ffadb7;font-size:11px;display
    <div class="messages" id="messages"><div class="empty">选择或新建一个对话开始</div></div>
    <div class="composer">
     <div class="error" id="error"></div>
+    <div class="draft" id="draftAttachments"></div>
     <div class="composer-inner">
+     <button class="attach" id="attachBtn" title="添加图片或文本附件">📎</button>
+     <input type="file" id="fileInput" multiple hidden accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.java,.kt,.c,.h,.cpp,.cc,.hpp,.cs,.go,.rs,.rb,.php,.swift,.sql,.sh,.bash,.bat,.cmd,.ps1,.vue,.svelte,.lua,.r,.m,.mm">
      <textarea id="input" rows="1" placeholder="输入消息…"></textarea>
      <button class="send" id="sendBtn">➤</button>
     </div>
+    <div class="attach-hint" id="attachHint"></div>
    </div>
   </section>
  </div>
@@ -674,6 +750,8 @@ const $ = (id) => document.getElementById(id);
 let conversations = [];
 let currentId = null;
 let busy = false;
+let draftAttachments = [];
+let limits = {image_mb: 10, text_mb: 2, max_attachments: 6};
 function esc(v){return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(path, options={}){
   const sep = path.includes('?') ? '&' : '?';
@@ -685,7 +763,57 @@ async function api(path, options={}){
   return data;
 }
 function showError(text){ const e=$('error'); e.textContent=text; e.style.display=text?'block':'none'; }
-function setBusy(v){ busy=v; $('sendBtn').disabled=v; $('sendBtn').textContent=v?'…':'➤'; }
+function setBusy(v){ busy=v; $('sendBtn').disabled=v; $('attachBtn').disabled=v; $('sendBtn').textContent=v?'…':'➤'; }
+function isImageFile(file){
+  const ext=(file.name.split('.').pop()||'').toLowerCase();
+  return ['image/png','image/jpeg','image/webp','image/gif','image/bmp'].includes(file.type)
+    || ['png','jpg','jpeg','webp','gif','bmp'].includes(ext);
+}
+function renderDraft(){
+  const box=$('draftAttachments');
+  box.innerHTML=draftAttachments.map((a,i)=>
+    `<div class="chip">${a.preview?`<img src="${a.preview}" alt="">`:'📎'}<span>${esc(a.filename)}</span><button type="button" data-index="${i}" title="移除">×</button></div>`
+  ).join('');
+  box.querySelectorAll('button[data-index]').forEach(btn=>btn.onclick=()=>{
+    draftAttachments.splice(Number(btn.dataset.index),1); renderDraft();
+  });
+  $('attachBtn').title=`添加附件（最多 ${limits.max_attachments} 个；图片 ${limits.image_mb} MB，文本 ${limits.text_mb} MB）`;
+  $('attachHint').textContent=`图片≤${limits.image_mb}MB · 文本≤${limits.text_mb}MB · 最多${limits.max_attachments}个`;
+}
+function readDataUrl(file){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>resolve(String(reader.result||''));
+    reader.onerror=()=>reject(reader.error||new Error('读取文件失败'));
+    reader.readAsDataURL(file);
+  });
+}
+async function addFiles(files){
+  const list=Array.from(files||[]);
+  if(!list.length) return;
+  const errors=[];
+  for(const file of list){
+    if(draftAttachments.length>=limits.max_attachments){
+      errors.push(`每条消息最多 ${limits.max_attachments} 个附件`); break;
+    }
+    const image=isImageFile(file);
+    const maxMb=image?limits.image_mb:limits.text_mb;
+    if(file.size>maxMb*1024*1024){
+      errors.push(`${file.name} 超过 ${maxMb} MB`); continue;
+    }
+    try{
+      const dataUrl=await readDataUrl(file);
+      const encoded=dataUrl.split(',')[1]||'';
+      if(!encoded) throw new Error('文件内容为空');
+      draftAttachments.push({
+        filename:file.name, mime_type:file.type||'', data:encoded,
+        preview:image?dataUrl:''
+      });
+    }catch(e){ errors.push(`${file.name}: ${e.message||'读取失败'}`); }
+  }
+  renderDraft();
+  if(errors.length) showError(errors.join(' / '));
+}
 function scrollBottom(){ const m=$('messages'); m.scrollTop=m.scrollHeight; }
 function renderConversations(){
   const box=$('convList');
@@ -726,6 +854,7 @@ async function loadConversations(selectId){
   else if(!currentId && conversations.length) await openConversation(conversations[0].id);
 }
 async function openConversation(id){
+  if(currentId!==id){ draftAttachments=[]; renderDraft(); }
   currentId=id; showError('');
   const data=await api('/api/conversations/'+id);
   renderMessages(data); renderConversations();
@@ -733,16 +862,27 @@ async function openConversation(id){
 async function send(){
   if(busy) return;
   const text=$('input').value.trim();
-  if(!text || !currentId) return;
+  if((!text && !draftAttachments.length) || !currentId) return;
   setBusy(true); showError('');
   try{
     await api('/api/conversations/'+currentId+'/messages', {
-      method:'POST', body: JSON.stringify({content:text})
+      method:'POST',
+      body: JSON.stringify({
+        content:text,
+        attachments:draftAttachments.map(a=>({filename:a.filename,mime_type:a.mime_type,data:a.data}))
+      })
     });
     $('input').value=''; $('input').style.height='auto';
+    draftAttachments=[]; renderDraft();
     await loadConversations(currentId);
   }catch(e){ showError(e.message); }
   finally{ setBusy(false); $('input').focus(); }
+}
+async function loadLimits(){
+  try{
+    const data=await api('/api/limits');
+    limits={...limits,...data}; renderDraft();
+  }catch(e){ /* keep defaults; file upload will still be validated server-side */ }
 }
 async function newConversation(){
   try{
@@ -758,7 +898,10 @@ $('backdrop').onclick=closeSidebar;
 $('refreshBtn').onclick=()=>loadConversations(currentId);
 $('newBtn').onclick=newConversation;
 $('sendBtn').onclick=send;
+$('attachBtn').onclick=()=>$('fileInput').click();
+$('fileInput').onchange=async(e)=>{await addFiles(e.target.files); e.target.value='';};
 $('input').addEventListener('input',()=>{const el=$('input'); el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px';});
 $('input').addEventListener('keydown',(e)=>{if(e.key==='Enter'&&!e.shiftKey&&window.innerWidth>760){e.preventDefault();send();}});
-loadConversations().catch(e=>showError(e.message));
+renderDraft();
+loadLimits().finally(()=>loadConversations().catch(e=>showError(e.message)));
 </script></body></html>"""

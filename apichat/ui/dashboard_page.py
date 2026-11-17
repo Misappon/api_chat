@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -136,6 +137,7 @@ class DashboardPage(QWidget):
     new_chat_requested = Signal()
     api_manager_requested = Signal()
     font_scale_changed = Signal(float)
+    attachment_limits_changed = Signal(int, int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -209,6 +211,43 @@ class DashboardPage(QWidget):
         refresh.clicked.connect(self.refresh_requested)
         header.addWidget(refresh)
         layout.addLayout(header)
+
+        limit_box = QFrame()
+        limit_box.setObjectName("limitBox")
+        limit_layout = QHBoxLayout(limit_box)
+        limit_layout.setContentsMargins(14, 8, 14, 8)
+        limit_layout.setSpacing(8)
+        limit_title = QLabel("附件上传上限")
+        limit_title.setObjectName("limitTitle")
+        limit_layout.addWidget(limit_title)
+        limit_hint = QLabel("单文件")
+        limit_hint.setObjectName("limitHint")
+        limit_layout.addWidget(limit_hint)
+        limit_layout.addSpacing(8)
+        limit_layout.addWidget(QLabel("图片"))
+        self.image_limit_spin = QSpinBox()
+        self.image_limit_spin.setObjectName("limitSpin")
+        self.image_limit_spin.setRange(1, 50)
+        self.image_limit_spin.setValue(10)
+        self.image_limit_spin.setSuffix(" MB")
+        self.image_limit_spin.setToolTip("单张图片的最大上传大小")
+        limit_layout.addWidget(self.image_limit_spin)
+        limit_layout.addSpacing(8)
+        limit_layout.addWidget(QLabel("文本"))
+        self.text_limit_spin = QSpinBox()
+        self.text_limit_spin.setObjectName("limitSpin")
+        self.text_limit_spin.setRange(1, 20)
+        self.text_limit_spin.setValue(2)
+        self.text_limit_spin.setSuffix(" MB")
+        self.text_limit_spin.setToolTip("单个文本/代码文件的最大上传大小")
+        limit_layout.addWidget(self.text_limit_spin)
+        limit_layout.addStretch(1)
+        limit_note = QLabel("对桌面端和手机网页端同时生效")
+        limit_note.setObjectName("limitHint")
+        limit_layout.addWidget(limit_note)
+        layout.addWidget(limit_box)
+        self.image_limit_spin.valueChanged.connect(self._emit_attachment_limits)
+        self.text_limit_spin.valueChanged.connect(self._emit_attachment_limits)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -425,6 +464,19 @@ class DashboardPage(QWidget):
     def _change_font(self, delta: float) -> None:
         target = max(MIN_FONT_SCALE, min(MAX_FONT_SCALE, self._font_scale + delta))
         self.font_scale_changed.emit(round(target, 2))
+
+    def _emit_attachment_limits(self) -> None:
+        self.attachment_limits_changed.emit(
+            self.image_limit_spin.value(), self.text_limit_spin.value()
+        )
+
+    def set_attachment_limits(self, image_mb: int, text_mb: int) -> None:
+        self.image_limit_spin.blockSignals(True)
+        self.text_limit_spin.blockSignals(True)
+        self.image_limit_spin.setValue(max(1, min(50, int(image_mb))))
+        self.text_limit_spin.setValue(max(1, min(20, int(text_mb))))
+        self.image_limit_spin.blockSignals(False)
+        self.text_limit_spin.blockSignals(False)
 
     def set_font_scale(self, scale: float) -> None:
         self._font_scale = max(MIN_FONT_SCALE, min(MAX_FONT_SCALE, scale))

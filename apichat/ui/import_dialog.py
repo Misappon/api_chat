@@ -54,8 +54,8 @@ class ImportConversationDialog(QDialog):
         title = QLabel("导入网页分享对话")
         title.setObjectName("dialogTitle")
         subtitle = QLabel(
-            "读取公开分享页，重整为本应用对话并继续聊天。支持 ChatGPT / Claude / Gemini "
-            "等分享页，也支持另存的 HTML 或粘贴文本。"
+            "读取公开分享页，重整为本应用对话并继续聊天。支持 ChatGPT / Claude / Gemini / "
+            "DeepSeek 等分享页，也支持另存的 HTML 或粘贴文本。"
         )
         subtitle.setObjectName("dialogSubtitle")
         subtitle.setWordWrap(True)
@@ -131,7 +131,9 @@ class ImportConversationDialog(QDialog):
         label.setObjectName("fieldLabel")
         layout.addWidget(label)
         self.url_edit = QLineEdit()
-        self.url_edit.setPlaceholderText("https://chatgpt.com/share/… 或 https://claude.ai/share/…")
+        self.url_edit.setPlaceholderText(
+            "https://chatgpt.com/share/… 、 https://claude.ai/share/… 或 https://chat.deepseek.com/share/…"
+        )
         self.url_edit.returnPressed.connect(self._start_read)
         layout.addWidget(self.url_edit)
         hint = QLabel(

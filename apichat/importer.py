@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urlencode, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -44,6 +44,7 @@ ROLE_MARKERS = {
     "chatgpt": "assistant",
     "claude": "assistant",
     "gemini": "assistant",
+    "deepseek": "assistant",
     "ai": "assistant",
     "bot": "assistant",
     "模型": "assistant",
@@ -93,7 +94,7 @@ class ImportedConversation:
 def _clean_title(value: str, fallback: str = "导入的对话") -> str:
     value = re.sub(r"\s+", " ", (value or "")).strip()
     value = re.sub(
-        r"\s*[|·\-–—]\s*(ChatGPT|Claude|Gemini|Google Gemini|OpenAI).*$",
+        r"\s*[|·\-–—]\s*(ChatGPT|Claude|Gemini|Google Gemini|OpenAI|DeepSeek).*$",
         "",
         value,
         flags=re.IGNORECASE,
@@ -109,7 +110,11 @@ def _clean_text(value: str) -> str:
     cleaned = [line for line in lines if line.lower() not in NOISE_LINES]
     text = "\n".join(cleaned)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    text = re.sub(r"^(You said|ChatGPT said|Claude said|Gemini said)\s*[:：]\s*", "", text)
+    text = re.sub(
+        r"^(You said|ChatGPT said|Claude said|Gemini said|DeepSeek said)\s*[:：]\s*",
+        "",
+        text,
+    )
     return text.strip()
 
 
@@ -479,7 +484,7 @@ def _dom_messages(soup: BeautifulSoup, base_url: str) -> list[ImportedMessage]:
 
 def _transcript_messages(text: str) -> list[ImportedMessage]:
     pattern = re.compile(
-        r"^(You|User|Human|Me|Assistant|ChatGPT|Claude|Gemini|AI|Bot|"
+        r"^(You|User|Human|Me|Assistant|ChatGPT|Claude|Gemini|DeepSeek|AI|Bot|"
         r"用户|我|助手|模型)\s*(?:said|说)?\s*[:：]\s*(.*)$",
         re.IGNORECASE,
     )
@@ -698,7 +703,133 @@ def _download_images(
     ]
 
 
+def deepseek_share_id(url: str) -> Optional[str]:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host != "chat.deepseek.com" and not host.endswith(".deepseek.com"):
+        return None
+    match = re.search(r"/share/([^/?#]+)", parsed.path)
+    return unquote(match.group(1)) if match else None
+
+
+def parse_deepseek_payload(payload: Any, *, source: str = "") -> ImportedConversation:
+    if not isinstance(payload, dict):
+        raise ImportError("DeepSeek 分享接口返回了无法识别的数据。")
+    data = payload.get("data", payload)
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except ValueError as exc:
+            raise ImportError("DeepSeek 分享接口返回了无法识别的数据。") from exc
+    if not isinstance(data, dict):
+        raise ImportError("DeepSeek 分享接口没有返回对话数据。")
+    biz = data.get("biz_data")
+    if isinstance(biz, str):
+        try:
+            biz = json.loads(biz)
+        except ValueError:
+            biz = {}
+    if not isinstance(biz, dict):
+        biz = {}
+    raw_messages = biz.get("messages") or data.get("messages") or payload.get("messages")
+    if not isinstance(raw_messages, list) or not raw_messages:
+        raise ImportError("DeepSeek 分享接口没有返回可读取的消息。")
+    messages: list[ImportedMessage] = []
+    for item in raw_messages:
+        if not isinstance(item, dict):
+            continue
+        role = _role_from_value(item.get("role") or item.get("sender"))
+        fragments = item.get("fragments")
+        fragment_texts: list[str] = []
+        if isinstance(fragments, list):
+            for fragment in fragments:
+                if not isinstance(fragment, dict):
+                    continue
+                if str(fragment.get("type") or "").upper() not in {"REQUEST", "RESPONSE"}:
+                    continue
+                value = fragment.get("content")
+                if isinstance(value, str) and value.strip():
+                    fragment_texts.append(value)
+        # DeepSeek currently stores visible text in `fragments`; search/thinking
+        # fragments are intentionally skipped so they don't become chat turns.
+        message = None
+        if role in ("user", "assistant") and fragment_texts:
+            message = ImportedMessage(
+                role=role,
+                content=_clean_text("\n\n".join(fragment_texts)),
+            )
+        if message is None:
+            message = _normalise_message(item)
+        if message is None:
+            content = item.get("content")
+            text = content if isinstance(content, str) else ""
+            if role in ("user", "assistant") and text.strip():
+                message = ImportedMessage(role=role, content=_clean_text(text))
+        if message and (message.content or message.image_urls):
+            messages.append(message)
+    messages = _dedupe(messages)
+    if not messages:
+        raise ImportError("DeepSeek 分享接口没有返回可读取的消息。")
+    title = str(biz.get("title") or data.get("title") or "").strip()
+    if not title or title.lower() in {"shared conversation", "shared chat"}:
+        title = _fallback_title(messages)
+    return ImportedConversation(
+        title=_clean_title(title, _fallback_title(messages)),
+        messages=messages[:MAX_IMPORTED_MESSAGES],
+        source=source or "https://chat.deepseek.com",
+    )
+
+
+def import_deepseek_share(url: str, *, download_images: bool = True) -> ImportedConversation:
+    share_id = deepseek_share_id(url)
+    if not share_id:
+        raise ImportError("不是有效的 DeepSeek 分享链接。")
+    endpoint = "https://chat.deepseek.com/api/v0/share/content?" + urlencode(
+        {"share_id": share_id}
+    )
+    try:
+        with httpx.Client(
+            follow_redirects=True,
+            timeout=httpx.Timeout(connect=20.0, read=60.0, write=20.0, pool=20.0),
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/json",
+                "Referer": url,
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            },
+            trust_env=True,
+        ) as client:
+            response = client.get(endpoint)
+            response.raise_for_status()
+            if len(response.content) > MAX_PAGE_BYTES:
+                raise ImportError("DeepSeek 分享内容超过 20 MB，已停止读取。")
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        hints = {
+            401: "DeepSeek 分享接口需要登录。",
+            403: "DeepSeek 分享接口禁止匿名读取。",
+            404: "DeepSeek 分享链接不存在或已失效。",
+            429: "DeepSeek 请求过于频繁，请稍后再试。",
+        }
+        hint = hints.get(code, f"DeepSeek 分享接口返回 HTTP {code}。")
+        raise ImportError(
+            f"{hint}\n\n请在浏览器中打开分享页并另存为 HTML 后导入，或粘贴对话文本。"
+        ) from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise ImportError(
+            f"无法读取 DeepSeek 分享链接：{exc}\n\n"
+            "请检查网络，或改用 HTML 文件 / 粘贴文本导入。"
+        ) from exc
+    conversation = parse_deepseek_payload(payload, source=url)
+    if download_images:
+        _download_images(conversation, base_url=url)
+    return conversation
+
+
 def import_from_url(url: str, *, download_images: bool = True) -> ImportedConversation:
+    if deepseek_share_id(url):
+        return import_deepseek_share(url, download_images=download_images)
     content, content_type, final_url = _fetch(url)
     text = content.decode("utf-8", errors="replace")
     if "json" in content_type.lower() or text.lstrip().startswith(("{", "[")):

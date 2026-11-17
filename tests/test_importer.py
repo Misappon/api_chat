@@ -14,7 +14,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from apichat.exporter import conversation_to_text
-from apichat.importer import ImportError, parse_html, parse_json, parse_transcript
+from apichat.importer import (
+    ImportError,
+    deepseek_share_id,
+    parse_deepseek_payload,
+    parse_html,
+    parse_json,
+    parse_transcript,
+)
 from apichat.models import Attachment, Conversation, Message
 
 
@@ -146,6 +153,42 @@ class ImporterTests(unittest.TestCase):
             thread.join(timeout=2)
         self.assertEqual(result.title, "网址分享")
         self.assertEqual(len(result.messages), 2)
+
+    def test_deepseek_share_payload(self) -> None:
+        self.assertEqual(
+            deepseek_share_id("https://chat.deepseek.com/share/abc123?from=copy"),
+            "abc123",
+        )
+        payload = {
+            "code": 0,
+            "data": {
+                "biz_data": {
+                    "title": "DeepSeek 分享测试",
+                    "messages": [
+                        {
+                            "role": "USER",
+                            "fragments": [
+                                {"type": "REQUEST", "content": "你好，介绍一下 Redis。"}
+                            ],
+                        },
+                        {
+                            "role": "ASSISTANT",
+                            "fragments": [
+                                {"type": "SEARCH", "content": "Found 10 web pages"},
+                                {
+                                    "type": "RESPONSE",
+                                    "content": "## Redis\n\n- 内存数据库\n- 支持持久化",
+                                },
+                            ],
+                        },
+                    ],
+                }
+            },
+        }
+        result = parse_deepseek_payload(payload, source="https://chat.deepseek.com/share/abc123")
+        self.assertEqual(result.title, "DeepSeek 分享测试")
+        self.assertEqual([item.role for item in result.messages], ["user", "assistant"])
+        self.assertIn("Redis", result.messages[1].content)
 
     def test_text_fallback(self) -> None:
         result = parse_transcript(

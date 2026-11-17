@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import socket
 import sys
@@ -157,6 +158,33 @@ class LanServerTests(unittest.TestCase):
         self.assertIn(conversation_id, self.changes)
         messages = self.repo.list_messages(conversation_id)
         self.assertEqual([message.role for message in messages], ["user", "assistant"])
+
+    def test_limits_and_attachment_upload(self) -> None:
+        with httpx.Client(timeout=30, trust_env=False) as client:
+            limits = client.get(self.base + "/api/limits?token=testtoken")
+            self.assertEqual(limits.status_code, 200)
+            self.assertGreater(limits.json()["image_mb"], 0)
+            created = client.post(self.base + "/api/conversations?token=testtoken", json={})
+            conversation_id = created.json()["conversation"]["id"]
+            content = base64.b64encode("来自手机的附件".encode("utf-8")).decode("ascii")
+            response = client.post(
+                self.base + f"/api/conversations/{conversation_id}/messages?token=testtoken",
+                json={
+                    "content": "",
+                    "attachments": [
+                        {
+                            "filename": "phone-note.txt",
+                            "mime_type": "text/plain",
+                            "data": content,
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+        messages = self.repo.list_messages(conversation_id, include_data=True)
+        self.assertEqual(messages[0].role, "user")
+        self.assertEqual(messages[0].attachments[0].filename, "phone-note.txt")
+        self.assertEqual(messages[0].attachments[0].data, "来自手机的附件".encode("utf-8"))
 
     def test_stop_sharing_closes_listener_and_connections(self) -> None:
         with httpx.Client(timeout=5, trust_env=False) as client:

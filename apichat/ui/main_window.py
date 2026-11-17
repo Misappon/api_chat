@@ -22,7 +22,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..attachment_utils import AttachmentError, prepare_attachment
+from ..attachment_utils import (
+    AttachmentError,
+    apply_attachment_limits,
+    attachment_limits_mb,
+    prepare_attachment,
+)
 from ..config import Config
 from ..db import Database, DatabaseError
 from ..exporter import safe_filename, write_conversation_text
@@ -82,6 +87,12 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             saved_scale = DEFAULT_FONT_SCALE
         self._font_scale = clamp_font_scale(saved_scale)
+        try:
+            image_mb = int(self.config.get("attachment_image_mb", 10))
+            text_mb = int(self.config.get("attachment_text_mb", 2))
+        except (TypeError, ValueError):
+            image_mb, text_mb = 10, 2
+        apply_attachment_limits(image_mb, text_mb)
         app = QApplication.instance()
         if app is not None:
             self._font_scale = apply_font_scale(app, self._font_scale)
@@ -90,6 +101,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1060, 700)
         self._build()
         self.dashboard.set_font_scale(self._font_scale)
+        self.dashboard.set_attachment_limits(*attachment_limits_mb())
         self._install_shortcuts()
         self._restore_geometry()
         self._load_all(restore_last=True)
@@ -159,6 +171,7 @@ class MainWindow(QMainWindow):
         self.dashboard.refresh_requested.connect(self.refresh_dashboard)
         self.dashboard.change_database_requested.connect(self.change_database)
         self.dashboard.font_scale_changed.connect(self.set_font_scale)
+        self.dashboard.attachment_limits_changed.connect(self.set_attachment_limits)
         self.dashboard.open_conversation.connect(self._open_from_dashboard)
         self.dashboard.new_chat_requested.connect(self.new_conversation)
         self.dashboard.api_manager_requested.connect(self.open_api_manager)
@@ -1161,6 +1174,15 @@ class MainWindow(QMainWindow):
         self.chat_page.refresh_markdown_styles()
         self._reload_conversations()
         self._set_status(f"全局字号 {int(round(new_scale * 100))}%")
+
+    def set_attachment_limits(self, image_mb: int, text_mb: int) -> None:
+        apply_attachment_limits(image_mb, text_mb)
+        actual_image, actual_text = attachment_limits_mb()
+        self.config.set("attachment_image_mb", actual_image, save=False)
+        self.config.set("attachment_text_mb", actual_text, save=False)
+        self.config.save()
+        self.dashboard.set_attachment_limits(actual_image, actual_text)
+        self._set_status(f"附件上限：图片 {actual_image} MB / 文本 {actual_text} MB")
 
     def _set_status(self, text: str) -> None:
         self.status.showMessage(text, 5000)

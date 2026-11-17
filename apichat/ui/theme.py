@@ -512,6 +512,18 @@ QToolButton#fontButton {{
 }}
 QToolButton#fontButton:hover {{ background-color: {SURFACE_3}; color: {TEXT}; }}
 QToolButton#fontButton:disabled {{ color: {FAINT}; }}
+QFrame#limitBox {{
+    background-color: {SURFACE};
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 9px;
+}}
+QLabel#limitTitle {{ color: {TEXT}; font-size: 11px; font-weight: 700; }}
+QLabel#limitHint {{ color: {FAINT}; font-size: 9px; }}
+QSpinBox#limitSpin {{
+    min-width: 82px;
+    padding: 3px 6px;
+    font-size: 10px;
+}}
 QFrame#kpiCard {{
     background-color: {SURFACE};
     border: 1px solid {BORDER_SOFT};

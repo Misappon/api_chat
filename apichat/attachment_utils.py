@@ -11,10 +11,33 @@ from PySide6.QtGui import QColor, QImage, QImageReader, QPainter
 from .models import Attachment
 from .tokens import estimate_tokens
 
-MAX_IMAGE_BYTES = 10 * 1024 * 1024
-MAX_TEXT_BYTES = 2 * 1024 * 1024
+DEFAULT_IMAGE_MB = 10
+DEFAULT_TEXT_MB = 2
+MAX_IMAGE_MB = 50
+MAX_TEXT_MB = 20
+MAX_IMAGE_BYTES = DEFAULT_IMAGE_MB * 1024 * 1024
+MAX_TEXT_BYTES = DEFAULT_TEXT_MB * 1024 * 1024
 MAX_ATTACHMENTS = 6
 THUMBNAIL_MAX = 480
+
+
+def apply_attachment_limits(image_mb: float, text_mb: float) -> None:
+    """Update the per-file limits used by desktop and LAN uploads."""
+    global MAX_IMAGE_BYTES, MAX_TEXT_BYTES
+    image_value = max(1, min(MAX_IMAGE_MB, int(image_mb)))
+    text_value = max(1, min(MAX_TEXT_MB, int(text_mb)))
+    MAX_IMAGE_BYTES = image_value * 1024 * 1024
+    MAX_TEXT_BYTES = text_value * 1024 * 1024
+
+
+def attachment_limits_mb() -> tuple[int, int]:
+    return MAX_IMAGE_BYTES // (1024 * 1024), MAX_TEXT_BYTES // (1024 * 1024)
+
+
+def max_request_bytes() -> int:
+    # Base64 expands binary by 4/3; leave room for JSON and long prompts.
+    binary = (MAX_IMAGE_BYTES + MAX_TEXT_BYTES) * MAX_ATTACHMENTS
+    return min(160 * 1024 * 1024, int(binary * 1.4) + 2 * 1024 * 1024)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 TEXT_EXTENSIONS = {
@@ -154,8 +177,9 @@ def attachment_from_path(path: str | Path) -> Attachment:
     if not file_path.is_file():
         raise AttachmentError(f"文件不存在：{file_path}")
     size = file_path.stat().st_size
-    if size > MAX_IMAGE_BYTES:
-        raise AttachmentError(f"文件超过 {format_bytes(MAX_IMAGE_BYTES)}：{file_path.name}")
+    largest = max(MAX_IMAGE_BYTES, MAX_TEXT_BYTES)
+    if size > largest:
+        raise AttachmentError(f"文件超过 {format_bytes(largest)}：{file_path.name}")
     data = file_path.read_bytes()
     mime_type, _ = mimetypes.guess_type(file_path.name)
     return attachment_from_bytes(data, file_path.name, mime_type=mime_type or "")

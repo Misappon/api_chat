@@ -22,6 +22,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "last_provider_id": None,
     "last_conversation_id": None,
     "font_scale": 1.0,
+    "attachment_image_mb": 10,
+    "attachment_text_mb": 2,
     "window": {"width": 1320, "height": 860, "x": None, "y": None},
 }
 
