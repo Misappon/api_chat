@@ -10,4 +10,6 @@ dist/
 .screenshot_home/
 .disthome/
 .debughome/
+.featurehome/
+.shotfinal/
 APIChatDebug.spec

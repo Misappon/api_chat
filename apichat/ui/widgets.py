@@ -6,8 +6,8 @@ import html
 import math
 
 import markdown
-from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QFontMetrics
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QFontMetrics, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..attachment_utils import format_bytes
+from ..models import Attachment
 from ..tokens import format_tokens, remaining_percent
 from .icons import icon
 from .theme import MUTED, percent_color
@@ -67,6 +69,94 @@ class IconButton(QToolButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setObjectName("tinyButton")
         self.setAutoRaise(True)
+
+
+class AttachmentChip(QFrame):
+    """Draft attachment chip shown above the composer."""
+
+    remove_requested = Signal(int)
+
+    def __init__(self, attachment: Attachment, index: int, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("attachmentChip")
+        self.setFixedWidth(188)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(6, 5, 4, 5)
+        layout.setSpacing(6)
+        preview = QLabel()
+        preview.setFixedSize(38, 38)
+        preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        preview.setObjectName("attachmentPreview")
+        pixmap = QPixmap()
+        if attachment.thumbnail:
+            pixmap.loadFromData(attachment.thumbnail)
+        elif attachment.is_image and attachment.data:
+            pixmap.loadFromData(attachment.data)
+        if not pixmap.isNull():
+            preview.setPixmap(
+                pixmap.scaled(
+                    38,
+                    38,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        else:
+            preview.setPixmap(icon("file", MUTED, 20).pixmap(20, 20))
+        layout.addWidget(preview, 0)
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(1)
+        name = ElidedLabel(attachment.filename)
+        name.setObjectName("attachmentName")
+        name.setFixedWidth(108)
+        meta = QLabel(format_bytes(attachment.size_bytes or len(attachment.data)))
+        meta.setObjectName("attachmentMeta")
+        text.addWidget(name)
+        text.addWidget(meta)
+        layout.addLayout(text, 1)
+        remove = IconButton("close", tooltip="移除附件", size=12)
+        remove.setFixedSize(20, 20)
+        remove.clicked.connect(lambda: self.remove_requested.emit(index))
+        layout.addWidget(remove, 0, Qt.AlignmentFlag.AlignTop)
+        self.setToolTip(
+            f"{attachment.filename}\n{attachment.mime_type}\n"
+            f"{format_bytes(attachment.size_bytes or len(attachment.data))}"
+        )
+
+
+class ImageThumbnail(QLabel):
+    """Clickable image preview inside a message bubble."""
+
+    clicked = Signal(int)
+
+    def __init__(self, attachment: Attachment, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("messageImage")
+        self.attachment_id = attachment.id
+        pixmap = QPixmap()
+        data = attachment.thumbnail or attachment.data
+        if data:
+            pixmap.loadFromData(data)
+        if not pixmap.isNull():
+            pixmap = pixmap.scaled(
+                250,
+                180,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.setPixmap(pixmap)
+            self.setFixedSize(pixmap.size())
+        else:
+            self.setText("图片")
+            self.setFixedSize(120, 80)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"{attachment.filename} · 点击查看大图")
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if self.attachment_id:
+            self.clicked.emit(self.attachment_id)
+        super().mousePressEvent(event)
 
 
 class ContextPill(QFrame):

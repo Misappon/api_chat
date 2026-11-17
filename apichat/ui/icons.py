@@ -103,6 +103,37 @@ _ICONS: dict[str, tuple[str, bool]] = {
         "<path d='M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z'/>",
         False,
     ),
+    "paperclip": (
+        "<path d='M21.4 11.6l-8.5 8.5a5 5 0 0 1-7.1-7.1l8.6-8.6a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.9-7.9'/>",
+        False,
+    ),
+    "file": (
+        "<path d='M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z'/>"
+        "<path d='M14 2v6h6M8 13h8M8 17h6'/>",
+        False,
+    ),
+    "image": (
+        "<rect x='3' y='3' width='18' height='18' rx='2'/>"
+        "<circle cx='8.5' cy='8.5' r='1.5'/><path d='m21 15-5-5L5 21'/>",
+        False,
+    ),
+    "download": ("<path d='M12 3v12M7 10l5 5 5-5M5 21h14'/>", False),
+    "upload": ("<path d='M12 21V9M7 14l5-5 5 5M5 3h14'/>", False),
+    "share": (
+        "<circle cx='18' cy='5' r='3'/><circle cx='6' cy='12' r='3'/><circle cx='18' cy='19' r='3'/>"
+        "<path d='M8.6 10.5l6.8-4M8.6 13.5l6.8 4'/>",
+        False,
+    ),
+    "link": (
+        "<path d='M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1'/>"
+        "<path d='M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1'/>",
+        False,
+    ),
+    "wifi": (
+        "<path d='M2 8.8a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 14 0M8.5 16.2a5 5 0 0 1 7 0'/>"
+        "<circle cx='12' cy='20' r='1' fill='currentColor' stroke='none'/>",
+        False,
+    ),
 }
 
 _CACHE: dict[tuple[str, str, int], QIcon] = {}

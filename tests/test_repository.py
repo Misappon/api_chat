@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pymysql
 
 from apichat.db import Database
-from apichat.models import Provider
+from apichat.models import Attachment, Provider
 from apichat.repository import Repository, RepositoryError
 from apichat.tokens import message_tokens
 
@@ -178,6 +178,38 @@ class RepositoryTests(unittest.TestCase):
 
     def test_message_token_estimates_are_positive(self) -> None:
         self.assertGreater(message_tokens("user", "你好 hello"), 0)
+
+    def test_attachment_roundtrip_and_token_preservation(self) -> None:
+        provider = self._provider("AttachAPI")
+        conv_id = self.repo.create_conversation(provider.id)
+        attachment = Attachment(
+            filename="notes.txt",
+            mime_type="text/plain",
+            kind="text",
+            size_bytes=5,
+            token_count=8,
+            data=b"hello",
+        )
+        message_id = self.repo.add_message(
+            conv_id,
+            "user",
+            "read this",
+            model=provider.model,
+            attachments=[attachment],
+        )
+        messages = self.repo.list_messages(conv_id)
+        self.assertEqual(len(messages[0].attachments), 1)
+        self.assertEqual(messages[0].attachments[0].filename, "notes.txt")
+        self.assertEqual(messages[0].token_count, message_tokens("user", "read this") + 8)
+        api_messages = self.repo.api_messages(conv_id)
+        self.assertEqual(api_messages[0]["attachments"][0].data, b"hello")
+        self.repo.update_message(message_id, "changed")
+        self.assertEqual(
+            self.repo.get_message(message_id).token_count,
+            message_tokens("user", "changed") + 8,
+        )
+        fetched = self.repo.get_attachment(messages[0].attachments[0].id)
+        self.assertEqual(fetched.data, b"hello")
 
 
 if __name__ == "__main__":

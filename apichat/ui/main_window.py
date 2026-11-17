@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import threading
 from dataclasses import replace
+from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -20,21 +22,32 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..attachment_utils import AttachmentError, prepare_attachment
 from ..config import Config
 from ..db import Database, DatabaseError
+from ..exporter import safe_filename, write_conversation_text
+from ..importer import ImportedConversation
+from ..lan_server import LanShareServer
 from ..llm import clean_title
 from ..models import CompletionResult, Conversation, Provider
 from ..repository import Repository, RepositoryError
 from ..tokens import context_tokens, estimate_tokens, format_tokens
 from ..workers import ChatStreamWorker, TitleWorker
 from .api_dialog import ApiManagerDialog
+from .attachment_preview import AttachmentPreviewDialog
 from .chat_page import ChatPage
 from .dashboard_page import DashboardPage
 from .database_dialog import DatabaseDialog
 from .edit_dialog import EditMessageDialog
+from .import_dialog import ImportConversationDialog
+from .share_dialog import ShareDialog
 from .sidebar import Sidebar
 from .theme import FAINT, enable_dark_title_bar
 from .widgets import Toast
+
+
+class _LanBridge(QObject):
+    changed = Signal(int)
 
 
 class MainWindow(QMainWindow):
@@ -53,6 +66,9 @@ class MainWindow(QMainWindow):
         self._stream_messages: list[dict] = []
         self._title_workers: dict[int, TitleWorker] = {}
         self._epoch = 0
+        self.lan_server: Optional[LanShareServer] = None
+        self._lan_bridge = _LanBridge(self)
+        self._lan_bridge.changed.connect(self._on_lan_changed)
         self.setWindowTitle("API Chat · 本地 LLM 工作台")
         self.setWindowIcon(QApplication.windowIcon())
         self.setMinimumSize(1060, 700)
@@ -96,6 +112,9 @@ class MainWindow(QMainWindow):
         self.sidebar.dashboard_requested.connect(self.open_dashboard)
         self.sidebar.api_manager_requested.connect(self.open_api_manager)
         self.sidebar.database_requested.connect(self.change_database)
+        self.sidebar.import_requested.connect(self.import_shared_conversation)
+        self.sidebar.export_requested.connect(self.export_conversation)
+        self.sidebar.share_requested.connect(self.open_share_dialog)
         self.sidebar.rename_requested.connect(self.rename_conversation)
         self.sidebar.delete_requested.connect(self.delete_conversation)
         self.sidebar.clear_requested.connect(self.clear_conversation)
@@ -104,6 +123,10 @@ class MainWindow(QMainWindow):
         self.chat_page.send_requested.connect(self.send_message)
         self.chat_page.stop_requested.connect(self.stop_generation)
         self.chat_page.edit_requested.connect(self.edit_message)
+        self.chat_page.attachment_preview_requested.connect(self.preview_attachment)
+        self.chat_page.export_requested.connect(
+            lambda: self.export_conversation(self.current_id())
+        )
         self.chat_page.provider_changed.connect(self.change_provider)
         self.chat_page.title_changed.connect(self.title_changed)
         self.chat_page.new_chat_requested.connect(self.new_conversation)
@@ -371,7 +394,7 @@ class MainWindow(QMainWindow):
                 return provider
         return self._default_provider()
 
-    def send_message(self, text: str) -> None:
+    def send_message(self, text: str, attachments: Optional[list] = None) -> None:
         if self._generating:
             return
         if not self.current_conversation:
@@ -385,17 +408,21 @@ class MainWindow(QMainWindow):
                 can_retry=False,
             )
             return
-        if not text.strip():
+        text = (text or "").strip()
+        attachment_list = list(attachments or [])
+        if not text and not attachment_list:
             return
         try:
+            prepared = [prepare_attachment(attachment) for attachment in attachment_list]
             self.repo.add_message(
                 self.current_conversation.id,
                 "user",
-                text.strip(),
+                text,
                 model=provider.model,
+                attachments=prepared,
             )
             messages = self.repo.list_messages(self.current_conversation.id)
-        except RepositoryError as exc:
+        except (RepositoryError, AttachmentError) as exc:
             QMessageBox.critical(self, "发送失败", str(exc))
             return
         if messages:
@@ -858,6 +885,164 @@ class MainWindow(QMainWindow):
         if self.stack.currentWidget() is self.dashboard:
             self.refresh_dashboard()
 
+    # ------------------------------------------------------------------
+    # attachments / import / export / LAN
+    # ------------------------------------------------------------------
+    def preview_attachment(self, attachment_id: int) -> None:
+        try:
+            attachment = self.repo.get_attachment(attachment_id)
+        except RepositoryError as exc:
+            QMessageBox.critical(self, "读取附件失败", str(exc))
+            return
+        if attachment is None:
+            self.show_toast("附件已不存在")
+            return
+        AttachmentPreviewDialog(attachment, self).exec()
+
+    def export_conversation(self, conversation_id: Optional[int]) -> None:
+        if conversation_id is None:
+            self.show_toast("请先选择一个对话")
+            return
+        try:
+            conversation = self.repo.get_conversation(conversation_id)
+            messages = self.repo.list_messages(conversation_id)
+        except RepositoryError as exc:
+            QMessageBox.critical(self, "读取对话失败", str(exc))
+            return
+        if conversation is None:
+            self.show_toast("对话不存在")
+            return
+        default_path = Path.home() / safe_filename(conversation.title)
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出对话",
+            str(default_path),
+            "文本文件 (*.txt);;Markdown 文件 (*.md);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+        target = Path(path)
+        if not target.suffix:
+            target = target.with_suffix(".txt")
+        try:
+            write_conversation_text(target, conversation, messages)
+        except OSError as exc:
+            QMessageBox.critical(self, "导出失败", str(exc))
+            return
+        self.show_toast(f"已导出到 {target.name}")
+        self._set_status(f"已导出：{target}")
+
+    def import_shared_conversation(self) -> None:
+        if self._generating:
+            self.show_toast("请先停止当前生成")
+            return
+        dialog = ImportConversationDialog(self)
+        if dialog.exec() != ImportConversationDialog.DialogCode.Accepted:
+            return
+        if dialog.imported is None:
+            return
+        self._import_conversation_data(dialog.imported)
+
+    def _import_conversation_data(self, imported: ImportedConversation) -> None:
+        provider = self._preferred_provider()
+        try:
+            conversation_id = self.repo.create_conversation(
+                provider.id if provider else None,
+                title=imported.title or "导入的对话",
+            )
+            self.repo.rename_conversation(
+                conversation_id, imported.title or "导入的对话", auto=False
+            )
+        except RepositoryError as exc:
+            QMessageBox.critical(self, "导入失败", str(exc))
+            return
+        imported_count = 0
+        try:
+            for message in imported.messages:
+                prepared = []
+                for attachment in message.attachments:
+                    try:
+                        prepared.append(prepare_attachment(attachment))
+                    except AttachmentError:
+                        continue
+                if not message.content.strip() and not prepared:
+                    continue
+                self.repo.add_message(
+                    conversation_id,
+                    message.role,
+                    message.content,
+                    model=provider.model if provider else "",
+                    attachments=prepared,
+                )
+                imported_count += 1
+        except (RepositoryError, AttachmentError) as exc:
+            try:
+                self.repo.delete_conversation(conversation_id)
+            except RepositoryError:
+                pass
+            QMessageBox.critical(self, "导入失败", str(exc))
+            return
+        if imported_count == 0:
+            try:
+                self.repo.delete_conversation(conversation_id)
+            except RepositoryError:
+                pass
+            QMessageBox.warning(self, "没有可导入内容", "没有识别到有效的消息。")
+            return
+        self._reload_conversations()
+        self.select_conversation(conversation_id)
+        self._set_status(f"已导入 {imported_count} 条消息")
+        self.show_toast(f"已导入 {imported_count} 条消息，可继续对话")
+
+    def open_share_dialog(self) -> None:
+        dialog = ShareDialog(
+            get_server=lambda: self.lan_server,
+            start_server=self._start_lan_server,
+            stop_server=self._stop_lan_server,
+            parent=self,
+        )
+        dialog.exec()
+
+    def _start_lan_server(self, port: int, token: str) -> LanShareServer:
+        self._stop_lan_server()
+        server = LanShareServer(
+            lambda: dict(self.db.config),
+            on_change=self._lan_bridge.changed.emit,
+            port=port,
+            token=token,
+        )
+        server.start()
+        self.lan_server = server
+        self._set_status(f"局域网共享已启动：{server.url}")
+        return server
+
+    def _stop_lan_server(self) -> None:
+        if self.lan_server is not None:
+            self.lan_server.stop()
+            self.lan_server = None
+            self._set_status("局域网共享已停止")
+
+    def _on_lan_changed(self, conversation_id: int) -> None:
+        self._reload_conversations()
+        self._refresh_dashboard_if_visible()
+        if self._generating:
+            return
+        if not self.current_conversation or self.current_conversation.id != conversation_id:
+            return
+        try:
+            conversation = self.repo.get_conversation(conversation_id)
+            messages = self.repo.list_messages(conversation_id)
+        except RepositoryError:
+            return
+        if conversation is None:
+            return
+        self.current_conversation = conversation
+        self.chat_page.load_conversation(
+            conversation, messages, self.providers, preserve_drafts=True
+        )
+        self.sidebar.select_conversation(conversation_id, emit=False)
+        self._set_status("移动端更新了当前对话")
+
     def open_api_manager(self) -> None:
         if self._generating:
             self.show_toast("请先停止当前生成")
@@ -987,6 +1172,7 @@ class MainWindow(QMainWindow):
                 worker.terminate()
                 worker.wait(800)
         self._title_workers.clear()
+        self._stop_lan_server()
         self._save_geometry()
         self.config.set(
             "last_conversation_id",

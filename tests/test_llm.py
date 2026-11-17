@@ -12,8 +12,15 @@ from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from apichat.llm import LLMClient, LLMError, clean_title
-from apichat.models import Provider
+from apichat.llm import (
+    LLMClient,
+    LLMError,
+    _anthropic_payload,
+    _gemini_payload,
+    _openai_messages,
+    clean_title,
+)
+from apichat.models import Attachment, Provider
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -307,6 +314,41 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(clean_title("标题：数据库设计。"), "数据库设计")
         self.assertEqual(clean_title('  "测试标题"  '), "测试标题")
         self.assertEqual(clean_title("", "新对话"), "新对话")
+
+    def test_multimodal_payloads(self) -> None:
+        image = Attachment(
+            filename="screen.png",
+            mime_type="image/png",
+            kind="image",
+            data=b"fake-png",
+            token_count=850,
+        )
+        text_file = Attachment(
+            filename="notes.py",
+            mime_type="text/x-python",
+            kind="text",
+            data=b"print(1)",
+            token_count=5,
+        )
+        messages = [
+            {"role": "user", "content": "please look", "attachments": [image, text_file]}
+        ]
+        provider = self._provider("openai", "mock-openai")
+        openai_messages = _openai_messages(provider, messages)
+        content = openai_messages[-1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertIn("notes.py", content[0]["text"])
+        self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+        anthropic = _anthropic_payload(provider, messages, False, 100, 0.2)
+        anthropic_content = anthropic["messages"][-1]["content"]
+        self.assertEqual(anthropic_content[1]["type"], "image")
+        self.assertEqual(anthropic_content[1]["source"]["type"], "base64")
+
+        gemini = _gemini_payload(provider, messages, 100, 0.2)
+        gemini_parts = gemini["contents"][-1]["parts"]
+        self.assertEqual(gemini_parts[1]["inline_data"]["mime_type"], "image/png")
+        self.assertTrue(gemini_parts[1]["inline_data"]["data"])
 
 
 if __name__ == "__main__":

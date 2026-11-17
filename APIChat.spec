@@ -8,6 +8,8 @@ hiddenimports = collect_submodules("markdown.extensions") + [
     "pymysql",
     "cryptography",
     "httpx",
+    "bs4",
+    "soupsieve",
 ]
 
 # Conda keeps libffi/libexpat in Library/bin, outside the DLL search path used

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..models import Conversation
 from ..tokens import estimate_tokens, format_tokens
 from .icons import icon
@@ -100,6 +101,9 @@ class Sidebar(QFrame):
     dashboard_requested = Signal()
     api_manager_requested = Signal()
     database_requested = Signal()
+    import_requested = Signal()
+    export_requested = Signal(int)
+    share_requested = Signal()
     rename_requested = Signal(int)
     delete_requested = Signal(int)
     clear_requested = Signal(int)
@@ -144,6 +148,8 @@ class Sidebar(QFrame):
         brand.addStretch(1)
         layout.addLayout(brand)
 
+        new_row = QHBoxLayout()
+        new_row.setSpacing(6)
         self.new_button = QPushButton("  新建对话")
         self.new_button.setObjectName("newChat")
         self.new_button.setIcon(icon("plus", "#FFFFFF", 17))
@@ -151,7 +157,17 @@ class Sidebar(QFrame):
         self.new_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.new_button.setToolTip("新建对话 (Ctrl+N)")
         self.new_button.clicked.connect(self.new_chat_requested)
-        layout.addWidget(self.new_button)
+        new_row.addWidget(self.new_button, 1)
+        self.new_more = QPushButton()
+        self.new_more.setObjectName("newMore")
+        self.new_more.setIcon(icon("more", MUTED, 19))
+        self.new_more.setIconSize(QSize(19, 19))
+        self.new_more.setFixedSize(37, 37)
+        self.new_more.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.new_more.setToolTip("导入网页分享对话、导出或局域网共享")
+        self.new_more.clicked.connect(self._show_new_menu)
+        new_row.addWidget(self.new_more, 0)
+        layout.addLayout(new_row)
 
         self.search = QLineEdit()
         self.search.setObjectName("search")
@@ -215,6 +231,15 @@ class Sidebar(QFrame):
         self.api_button.clicked.connect(self.api_manager_requested)
         layout.addWidget(self.api_button)
 
+        self.share_button = QPushButton("  局域网共享")
+        self.share_button.setObjectName("navButton")
+        self.share_button.setIcon(icon("wifi", MUTED, 17))
+        self.share_button.setIconSize(QSize(17, 17))
+        self.share_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.share_button.setToolTip("在局域网内用手机浏览器访问")
+        self.share_button.clicked.connect(self.share_requested)
+        layout.addWidget(self.share_button)
+
         self.db_button = QPushButton("  api_chat")
         self.db_button.setObjectName("dbChip")
         self.db_button.setIcon(icon("database", MUTED, 15))
@@ -226,7 +251,7 @@ class Sidebar(QFrame):
 
         footer = QHBoxLayout()
         footer.setContentsMargins(2, 2, 2, 0)
-        version = QLabel("v1.0 · MySQL")
+        version = QLabel(f"v{__version__} · MySQL")
         version.setStyleSheet(f"color: {FAINT}; font-size: 9px;")
         footer.addWidget(version)
         footer.addStretch(1)
@@ -300,8 +325,10 @@ class Sidebar(QFrame):
         """Prevent switching context while a response is streaming."""
         self.list.setEnabled(not locked)
         self.new_button.setEnabled(not locked)
+        self.new_more.setEnabled(not locked)
         self.dashboard_button.setEnabled(not locked)
         self.api_button.setEnabled(not locked)
+        self.share_button.setEnabled(not locked)
         self.db_button.setEnabled(not locked)
         self.search.setEnabled(not locked)
 
@@ -322,6 +349,21 @@ class Sidebar(QFrame):
         if self._current_id is not None:
             self.conversation_selected.emit(self._current_id)
 
+    def _show_new_menu(self) -> None:
+        menu = QMenu(self)
+        import_action = QAction(icon("link", MUTED, 15), "导入网页分享对话…", menu)
+        import_action.triggered.connect(self.import_requested)
+        export_action = QAction(icon("download", MUTED, 15), "导出当前对话…", menu)
+        export_action.setEnabled(self._current_id is not None)
+        export_action.triggered.connect(lambda: self.export_requested.emit(self._current_id or 0))
+        share_action = QAction(icon("wifi", MUTED, 15), "共享到局域网…", menu)
+        share_action.triggered.connect(self.share_requested)
+        menu.addAction(import_action)
+        menu.addAction(export_action)
+        menu.addSeparator()
+        menu.addAction(share_action)
+        menu.exec(self.new_more.mapToGlobal(self.new_more.rect().bottomLeft()))
+
     def _show_context_menu(self, position) -> None:
         item = self.list.itemAt(position)
         if not item:
@@ -332,12 +374,15 @@ class Sidebar(QFrame):
         rename.triggered.connect(lambda: self.rename_requested.emit(conversation_id))
         regen = QAction(icon("sparkles", MUTED, 15), "自动生成标题", menu)
         regen.triggered.connect(lambda: self.regenerate_title_requested.emit(conversation_id))
+        export = QAction(icon("download", MUTED, 15), "导出为文本文件", menu)
+        export.triggered.connect(lambda: self.export_requested.emit(conversation_id))
         clear = QAction(icon("refresh", MUTED, 15), "清空消息", menu)
         clear.triggered.connect(lambda: self.clear_requested.emit(conversation_id))
         delete = QAction(icon("trash", "#FF7483", 15), "删除对话", menu)
         delete.triggered.connect(lambda: self.delete_requested.emit(conversation_id))
         menu.addAction(rename)
         menu.addAction(regen)
+        menu.addAction(export)
         menu.addSeparator()
         menu.addAction(clear)
         menu.addAction(delete)

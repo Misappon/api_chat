@@ -1,6 +1,6 @@
 # API Chat
 
-一个本地优先的 Win64 多模型聊天客户端。用 PySide6 构建界面，对话、API 配置和用量统计保存在本地 MySQL；支持 OpenAI 兼容接口、Anthropic 和 Google Gemini。
+一个本地优先的 Win64 多模型聊天客户端。用 PySide6 构建界面，对话、API 配置、附件和用量统计保存在本地 MySQL；支持 OpenAI 兼容接口、Anthropic 和 Google Gemini，也可以把对话共享给局域网内的手机浏览器继续使用。
 
 ![对话界面](docs/screenshot-chat.png)
 
@@ -17,6 +17,10 @@
 - **模型自动标题**：第一轮回复后由模型生成简短标题，可在标题栏直接改名，也可从菜单重新生成。
 - **综合控制台**：总 Tokens、输入/输出 Tokens、请求数、对话用量排行、各对话明细、按 API 汇总；支持一键切换数据库。
 - **本地用量联动**：消息被编辑、截断、删除或对话被清空/删除时，关联的用量事件会一起更新。
+- **附件与图片**：支持图片（PNG/JPG/WebP/GIF/BMP）和文本/代码文件，可拖入、粘贴或选择文件；图片会随消息进入多模态请求，支持大图预览和附件保存。
+- **网页对话导入**：从「新建对话」右侧的「…」进入，可读取公开的 ChatGPT / Claude / Gemini 分享链接、另存的 HTML，或粘贴带 User/Assistant 标记的文本。
+- **文本导出**：任意本地对话可导出为 UTF-8 文本，包含标题、API、模型、时间和附件清单。
+- **局域网共享**：启动带访问码的本地 HTTP 服务，手机连接同一 Wi-Fi 后即可查看对话、发送消息和查看附件；服务只共享当前 MySQL 数据库。
 - **Windows 原生体验**：深色界面、流式输出、停止生成、错误重试、快捷键、HiDPI 支持和自定义应用图标。
 
 ## 快速开始
@@ -48,7 +52,7 @@
 首次启动会自动创建 `api_chat` 数据库和以下表：
 
 ```
-api_providers  conversations  messages  usage_events  app_meta
+api_providers  conversations  messages  attachments  usage_events  app_meta
 ```
 
 如果 MySQL 连接失败，程序会弹出数据库设置窗口，可修改主机、端口、用户名、密码和数据库名。
@@ -106,6 +110,41 @@ build_exe.bat
 - 对话头部的提示会显示已用/总窗口；顶部「自动标题」表示标题由模型生成。
 - 估算按中英文混合文本计算，属于**近似值**；真实账单用量以 API 返回的 usage 为准，显示在综合控制台。
 
+### 附件与图片
+
+- 输入框左下角的回形针按钮可添加图片或文本/代码文件；也可以直接把文件拖入输入框，或从剪贴板粘贴图片。
+- 每条消息最多 6 个附件；图片单张上限 10 MB，文本附件单张上限 2 MB。
+- 图片会以缩略图显示在消息气泡中，点击可查看大图并保存原图；文本附件点击后可预览和保存。
+- 图片会按所选 API 的协议转换为 OpenAI `image_url`、Anthropic `image` 或 Gemini `inline_data`；文本文件会作为带文件名标记的上下文发送。
+- 只有支持视觉输入的模型才能理解图片；如果服务端报参数错误，请换用视觉模型或移除图片。
+- 导入的网页图片会尽量下载并保存到本地附件表，最多 20 张。
+
+![附件与图片](docs/screenshot-attachments.png)
+
+### 导入网页分享对话
+
+点击「新建对话」右侧的「…」→「导入网页分享对话…」，有三种来源：
+
+1. **分享链接**：直接粘贴公开的 ChatGPT / Claude / Gemini 分享链接。
+2. **HTML 文件**：在浏览器中打开分享页，按 Ctrl+S 另存为 HTML 后导入。适合需要登录或由 JavaScript 动态渲染的页面。
+3. **粘贴文本**：使用 `User: …` / `Assistant: …`、`用户：…` / `助手：…` 等标记粘贴对话。
+
+导入会创建一段新对话，角色、正文和可下载图片会重整为本地消息格式；标题设为手动标题，不会被自动生成覆盖。导入后可直接在当前 API 下继续聊天。
+
+![导入网页分享对话](docs/screenshot-import.png)
+
+> 分享页结构会随平台更新；解析优先读取页面内嵌 JSON，再尝试常见 DOM 选择器和文本标记。若链接需要登录，请使用 HTML 文件或粘贴文本。
+
+### 导出对话
+
+在对话右上角「…」、左侧「…」菜单或对话卡片右键菜单中选择「导出为文本文件」。导出内容包含：
+
+- 对话标题、API 别名、模型、创建时间和导出时间；
+- 每条消息的角色、时间和完整文本；
+- 附件类型、文件名、大小和图片尺寸。
+
+文件使用 UTF-8 with BOM，Windows 记事本可直接打开。
+
 ### 修改消息并重新提交
 
 - 用户消息右侧的铅笔按钮：可「仅保存修改」或「保存并重新提交」。
@@ -131,9 +170,28 @@ build_exe.bat
 
 ![数据库设置](docs/screenshot-database.png)
 
+### 局域网共享（手机 Web 页面）
+
+左侧「局域网共享」打开设置：
+
+- 设置监听端口和访问码，点击「启动共享」。
+- 手机与电脑连接同一个 Wi-Fi，用手机浏览器打开窗口中显示的地址即可。
+- 首次访问需要访问码；分享链接中已包含访问码。页面提供对话列表、消息查看、图片/文件附件、新建对话和继续聊天。
+- 手机端发送消息会调用该对话绑定的 API，并将用户消息、助手回复和 usage 一起写入当前数据库；桌面端会同步刷新。
+- 关闭设置窗口不会停止服务；需要停止时再次打开并点击「停止共享」。
+- 电脑端关闭程序时会自动停止共享。
+- Windows 防火墙首次可能询问是否允许 Python/APIChat 访问网络，请允许专用网络。
+
+![局域网共享设置](docs/screenshot-share.png)
+
+![手机端页面](docs/screenshot-mobile.png)
+
+> 服务只监听局域网地址，不经过云端；访问码用于阻止同一局域网内的未授权访问。使用 HTTP 明文传输，请仅在可信 Wi-Fi 下开启。
+
 ## 数据与用量说明
 
 - **对话数据**：`conversations`、`messages`。
+- **附件**：`attachments`，保存原文件、缩略图、MIME、尺寸和 token 估算；删除消息/对话时级联清理。
 - **API 配置**：`api_providers`（含 API Key、系统提示词）。
 - **用量**：`usage_events`。`chat` 事件挂在具体助手消息上；`title` 事件没有 `message_id`，但仍属于该对话。
 - 删除消息或截断历史时，通过外键级联删除对应 `chat` 事件；清空/删除对话会删除全部关联事件，因此控制台总量会同步减少。
@@ -157,23 +215,30 @@ APIChat/
     config.py                # JSON 配置
     db.py                    # MySQL 连接与建表
     repository.py            # 对话/消息/API/用量数据访问
-    models.py                # 数据模型
+    models.py                # 数据模型（含 Attachment）
     tokens.py                # token 估算、格式化
-    llm.py                   # OpenAI / Anthropic / Gemini 适配与流式解析
+    llm.py                   # OpenAI / Anthropic / Gemini 适配、多模态与流式解析
+    attachment_utils.py      # 图片/文本附件校验、缩略图
+    importer.py              # 分享链接 / HTML / 文本解析
+    exporter.py              # 文本导出
+    lan_server.py            # 局域网 HTTP 服务与移动端页面
     workers.py               # QThread 工作线程
     ui/
       main_window.py         # 应用编排
-      sidebar.py             # 对话列表与导航
-      chat_page.py           # 对话页面与输入框
-      message_bubble.py      # 消息气泡
+      sidebar.py             # 对话列表、导入/导出/共享入口
+      chat_page.py           # 对话页面、附件输入
+      message_bubble.py      # 消息气泡、图片/文件展示
+      attachment_preview.py  # 附件预览/保存
       dashboard_page.py      # 综合控制台
       api_dialog.py          # API 管理与编辑
       database_dialog.py     # 数据库设置
       edit_dialog.py         # 消息编辑
+      import_dialog.py       # 网页对话导入
+      share_dialog.py        # 局域网共享设置
       theme.py / icons.py    # 深色主题与矢量图标
   assets/                    # 应用图标与控件图标
   scripts/seed_demo.py       # 可选的演示数据（拒绝覆盖 api_chat）
-  tests/                     # 数据库与协议测试
+  tests/                     # 数据库、协议、导入导出、LAN 测试
   APIChat.spec / build_exe.bat
 ```
 
@@ -184,8 +249,11 @@ conda activate apichat
 python -m unittest discover -s tests -v
 ```
 
-- `tests/test_repository.py` 会创建临时 MySQL 数据库并在结束后删除，不会改动 `api_chat`。
-- `tests/test_llm.py` 启动本地假 HTTP 服务，测试 OpenAI SSE、Anthropic Messages、Gemini generateContent 和错误信息，不需要真实 API Key。
+- `tests/test_repository.py` 会创建临时 MySQL 数据库并在结束后删除，不会改动 `api_chat`；测试包含附件 token 和级联行为。
+- `tests/test_llm.py` 启动本地假 HTTP 服务，测试 OpenAI SSE、Anthropic Messages、Gemini generateContent、多模态 payload 和错误信息，不需要真实 API Key。
+- `tests/test_importer.py` 覆盖 ChatGPT JSON、Claude JSON、DOM、文本兜底、HTML 图片和导出格式。
+- `tests/test_lan_server.py` 覆盖访问码、移动端页面、对话列表、附件下载、新建对话和手机端发送消息。
+- 当前共 23 个测试。
 - 可选的演示数据：
 
   ```powershell
@@ -251,4 +319,7 @@ conda create -n apichat python=3.11 -y --offline
 
 - API Key 以明文保存在本地 MySQL 的 `api_providers.api_key` 字段中；数据库密码以明文保存在 `%APPDATA%\APIChat\config.json`。请只在可信的本地电脑上使用，并妥善保护 MySQL 账号。
 - 本程序不会上传对话到除所配置模型 API 之外的任何服务，也没有遥测。
+- 局域网共享使用随机访问码校验，但传输层是 **HTTP 明文**。同一 Wi-Fi 下的其他设备或网络监听者可能看到内容，请只在可信网络中临时开启，用完即停止。
+- 共享服务会暴露当前数据库中的全部对话；不要在包含敏感内容的数据库中长时间开启。
+- 导入网页时，程序会访问用户填写的公开 URL；请只导入自己信任的链接。
 - 如果多人共用电脑，建议为 MySQL 创建独立账号，并使用 Windows 文件权限保护配置目录。

@@ -12,13 +12,18 @@ import pymysql
 from .db import Database
 from .models import (
     ApiUsageRow,
+    Attachment,
     Conversation,
     DashboardRow,
     DashboardTotals,
     Message,
     Provider,
 )
-from .tokens import estimate_tokens, message_tokens, remaining_percent
+from .tokens import (
+    estimate_tokens,
+    message_tokens,
+    remaining_percent,
+)
 
 EMAIL_LIKE = re.compile(r"\S+@\S+")
 
@@ -96,6 +101,23 @@ class Repository:
         )
 
     @staticmethod
+    def _attachment_from_row(row: dict[str, Any]) -> Attachment:
+        return Attachment(
+            id=int(row["id"]),
+            message_id=int(row["message_id"]),
+            filename=row["filename"],
+            mime_type=row["mime_type"] or "",
+            kind=row["kind"] or "file",
+            size_bytes=int(row["size_bytes"] or 0),
+            width=int(row["width"] or 0),
+            height=int(row["height"] or 0),
+            token_count=int(row["token_count"] or 0),
+            thumbnail=row.get("thumbnail") or b"",
+            data=row.get("data") or b"",
+            created_at=_dt(row.get("created_at")),
+        )
+
+    @staticmethod
     def _message_from_row(row: dict[str, Any]) -> Message:
         return Message(
             id=int(row["id"]),
@@ -110,6 +132,30 @@ class Repository:
             completion_tokens=int(row.get("completion_tokens") or 0),
             usage_total=int(row.get("usage_total") or 0),
         )
+
+    @staticmethod
+    def _insert_attachments(cursor, message_id: int, attachments: list[Attachment] | None) -> None:
+        for attachment in attachments or []:
+            cursor.execute(
+                """
+                INSERT INTO attachments
+                    (message_id, filename, mime_type, kind, size_bytes, width, height,
+                     token_count, thumbnail, data)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """,
+                (
+                    message_id,
+                    attachment.filename[:255],
+                    attachment.mime_type[:120],
+                    attachment.kind,
+                    int(attachment.size_bytes or len(attachment.data or b"")),
+                    int(attachment.width or 0),
+                    int(attachment.height or 0),
+                    int(attachment.token_count or 0),
+                    attachment.thumbnail or None,
+                    attachment.data or b"",
+                ),
+            )
 
     # ------------------------------------------------------------------
     # providers
@@ -359,7 +405,35 @@ class Repository:
     # ------------------------------------------------------------------
     # messages
     # ------------------------------------------------------------------
-    def list_messages(self, conversation_id: int) -> list[Message]:
+    def _attach_attachments(
+        self, messages: list[Message], *, include_data: bool
+    ) -> list[Message]:
+        if not messages:
+            return messages
+        ids = [message.id for message in messages]
+        placeholders = ",".join(["%s"] * len(ids))
+        data_column = ", data" if include_data else ""
+        with self.db.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT id, message_id, filename, mime_type, kind, size_bytes,
+                       width, height, token_count, thumbnail{data_column}, created_at
+                FROM attachments
+                WHERE message_id IN ({placeholders})
+                ORDER BY id ASC
+                """,
+                ids,
+            )
+            rows = cursor.fetchall()
+        by_message: dict[int, list[Attachment]] = {}
+        for row in rows:
+            attachment = self._attachment_from_row(row)
+            by_message.setdefault(attachment.message_id, []).append(attachment)
+        for message in messages:
+            message.attachments = by_message.get(message.id, [])
+        return messages
+
+    def list_messages(self, conversation_id: int, *, include_data: bool = False) -> list[Message]:
         sql = """
             SELECT m.*,
                    COALESCE(u.prompt_tokens,0) AS prompt_tokens,
@@ -381,7 +455,8 @@ class Repository:
         try:
             with self.db.cursor() as cursor:
                 cursor.execute(sql, (conversation_id,))
-                return [self._message_from_row(row) for row in cursor.fetchall()]
+                messages = [self._message_from_row(row) for row in cursor.fetchall()]
+            return self._attach_attachments(messages, include_data=include_data)
         except Exception as exc:
             raise RepositoryError(f"读取消息失败：{exc}") from exc
 
@@ -395,7 +470,25 @@ class Repository:
                 (message_id,),
             )
             row = cursor.fetchone()
-        return self._message_from_row(row) if row else None
+        if not row:
+            return None
+        message = self._message_from_row(row)
+        self._attach_attachments([message], include_data=False)
+        return message
+
+    def get_attachment(self, attachment_id: int, *, include_data: bool = True) -> Optional[Attachment]:
+        data_column = ", data" if include_data else ""
+        with self.db.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT id, message_id, filename, mime_type, kind, size_bytes,
+                       width, height, token_count, thumbnail{data_column}, created_at
+                FROM attachments WHERE id=%s
+                """,
+                (attachment_id,),
+            )
+            row = cursor.fetchone()
+        return self._attachment_from_row(row) if row else None
 
     def add_message(
         self,
@@ -406,8 +499,14 @@ class Repository:
         model: str = "",
         token_count: Optional[int] = None,
         usage: Optional[dict[str, Any]] = None,
+        attachments: Optional[list[Attachment]] = None,
     ) -> int:
-        tokens = int(token_count) if token_count is not None else message_tokens(role, content)
+        attachment_list = attachments or []
+        tokens = (
+            int(token_count)
+            if token_count is not None
+            else message_tokens(role, content, attachment_list)
+        )
         try:
             with self._transaction() as cursor:
                 cursor.execute(
@@ -418,6 +517,7 @@ class Repository:
                     (conversation_id, role, content, max(0, tokens), model or ""),
                 )
                 message_id = int(cursor.lastrowid)
+                self._insert_attachments(cursor, message_id, attachment_list)
                 if usage:
                     prompt = int(usage.get("prompt_tokens") or 0)
                     completion = int(usage.get("completion_tokens") or 0)
@@ -451,9 +551,24 @@ class Repository:
     def update_message(
         self, message_id: int, content: str, *, token_count: Optional[int] = None
     ) -> None:
-        tokens = int(token_count) if token_count is not None else estimate_tokens(content)
         try:
             with self.db.cursor() as cursor:
+                cursor.execute(
+                    "SELECT role FROM messages WHERE id=%s", (message_id,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return
+                if token_count is not None:
+                    tokens = int(token_count)
+                else:
+                    cursor.execute(
+                        "SELECT COALESCE(SUM(token_count),0) AS c FROM attachments "
+                        "WHERE message_id=%s",
+                        (message_id,),
+                    )
+                    attachment_total = int(cursor.fetchone()["c"] or 0)
+                    tokens = message_tokens(row["role"], content) + attachment_total
                 cursor.execute(
                     "UPDATE messages SET content=%s, token_count=%s WHERE id=%s",
                     (content, max(0, tokens), message_id),
@@ -486,8 +601,18 @@ class Repository:
                     raise RepositoryError("要修改的消息已不存在，请刷新对话。")
                 if keep_target:
                     cursor.execute(
+                        "SELECT COALESCE(SUM(token_count),0) AS c FROM attachments "
+                        "WHERE message_id=%s",
+                        (message_id,),
+                    )
+                    attachment_total = int(cursor.fetchone()["c"] or 0)
+                    cursor.execute(
                         "UPDATE messages SET content=%s, token_count=%s WHERE id=%s",
-                        (content, message_tokens(target["role"], content), message_id),
+                        (
+                            content,
+                            message_tokens(target["role"], content) + attachment_total,
+                            message_id,
+                        ),
                     )
                     cursor.execute(
                         "DELETE FROM messages WHERE conversation_id=%s AND id>%s",
@@ -655,12 +780,18 @@ class Repository:
     # ------------------------------------------------------------------
     # misc
     # ------------------------------------------------------------------
-    def api_messages(self, conversation_id: int) -> list[dict[str, str]]:
-        """Message payload for the model, without DB-only metadata."""
+    def api_messages(self, conversation_id: int) -> list[dict]:
+        """Message payload for the model, including attachment data."""
+        messages = self.list_messages(conversation_id, include_data=True)
         return [
-            {"role": message.role, "content": message.content}
-            for message in self.list_messages(conversation_id)
-            if message.role in ("user", "assistant") and message.content.strip()
+            {
+                "role": message.role,
+                "content": message.content,
+                "attachments": message.attachments,
+            }
+            for message in messages
+            if message.role in ("user", "assistant")
+            and (message.content.strip() or message.attachments)
         ]
 
     def database_summary(self) -> dict[str, int]:

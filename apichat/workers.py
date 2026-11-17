@@ -6,6 +6,7 @@ import threading
 
 from PySide6.QtCore import QThread, Signal
 
+from .importer import import_from_html_file, import_from_url, parse_transcript
 from .llm import LLMClient, LLMError, title_messages
 from .models import Provider
 
@@ -64,6 +65,38 @@ class TitleWorker(QThread):
             self.succeeded.emit(self.conversation_id, result)
         except Exception as exc:
             self.failed.emit(self.conversation_id, str(exc))
+
+
+class ImportWorker(QThread):
+    succeeded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        mode: str,
+        value: str,
+        *,
+        download_images: bool = True,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.mode = mode
+        self.value = value
+        self.download_images = download_images
+
+    def run(self) -> None:
+        try:
+            if self.mode == "url":
+                result = import_from_url(self.value, download_images=self.download_images)
+            elif self.mode == "html":
+                result = import_from_html_file(
+                    self.value, download_images=self.download_images
+                )
+            else:
+                result = parse_transcript(self.value)
+            self.succeeded.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class ApiTestWorker(QThread):

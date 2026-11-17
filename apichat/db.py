@@ -10,7 +10,7 @@ from pymysql.cursors import DictCursor
 
 DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_STATEMENTS = [
     """
@@ -61,6 +61,25 @@ SCHEMA_STATEMENTS = [
         KEY idx_messages_conversation (conversation_id, id),
         CONSTRAINT fk_message_conversation FOREIGN KEY (conversation_id)
             REFERENCES conversations(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS attachments (
+        id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+        message_id   BIGINT NOT NULL,
+        filename     VARCHAR(255) NOT NULL,
+        mime_type    VARCHAR(120) NOT NULL DEFAULT '',
+        kind         VARCHAR(16) NOT NULL DEFAULT 'file',
+        size_bytes   INT NOT NULL DEFAULT 0,
+        width        INT NOT NULL DEFAULT 0,
+        height       INT NOT NULL DEFAULT 0,
+        token_count  INT NOT NULL DEFAULT 0,
+        thumbnail    MEDIUMBLOB NULL,
+        data         MEDIUMBLOB NOT NULL,
+        created_at   DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+        KEY idx_attachments_message (message_id),
+        CONSTRAINT fk_attachment_message FOREIGN KEY (message_id)
+            REFERENCES messages(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
