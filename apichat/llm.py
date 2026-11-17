@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import threading
 from typing import Callable, Iterable
@@ -10,7 +11,7 @@ from urllib.parse import quote
 import httpx
 
 from .models import CompletionResult, Provider
-from .tokens import estimate_tokens
+from .tokens import content_text, context_tokens, estimate_tokens
 
 
 class LLMError(RuntimeError):
@@ -149,17 +150,80 @@ def _request_headers(provider: Provider) -> dict[str, str]:
     return headers
 
 
-def _openai_messages(provider: Provider, messages: Iterable[dict]) -> list[dict[str, str]]:
-    result: list[dict[str, str]] = []
+def _decode_attachment_text(data: bytes) -> str:
+    for encoding in ("utf-8-sig", "gb18030", "utf-16"):
+        try:
+            return data.decode(encoding)
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _attachment_parts(attachments: Iterable) -> tuple[str, list]:
+    """Return merged text-file content and image attachment objects."""
+    texts: list[str] = []
+    images: list = []
+    for attachment in attachments or []:
+        if isinstance(attachment, dict):
+            kind = attachment.get("kind", "file")
+            filename = attachment.get("filename", "附件")
+            data = attachment.get("data") or b""
+            mime_type = attachment.get("mime_type", "")
+        else:
+            kind = getattr(attachment, "kind", "file")
+            filename = getattr(attachment, "filename", "附件")
+            data = getattr(attachment, "data", b"") or b""
+            mime_type = getattr(attachment, "mime_type", "")
+        if kind == "image":
+            if data:
+                images.append((attachment, mime_type or "image/png", data))
+        elif kind == "text":
+            text = _decode_attachment_text(data) if isinstance(data, (bytes, bytearray)) else str(data)
+            if text:
+                if len(text) > 120_000:
+                    text = text[:120_000] + "\n\n[附件内容已截断]"
+                texts.append(f"[附件: {filename}]\n{text}")
+    return "\n\n".join(texts), images
+
+
+def _merge_message_text(content, attachments: Iterable) -> tuple[str, list]:
+    text = content_text(content)
+    attachment_text, images = _attachment_parts(attachments)
+    if attachment_text:
+        text = f"{text}\n\n{attachment_text}".strip()
+    return text, images
+
+
+def _image_data_url(mime_type: str, data: bytes) -> str:
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime_type or 'image/png'};base64,{encoded}"
+
+
+def _openai_messages(provider: Provider, messages: Iterable[dict]) -> list[dict]:
+    result: list[dict] = []
     if provider.system_prompt.strip():
         result.append({"role": "system", "content": provider.system_prompt.strip()})
     for message in messages:
         role = message.get("role")
         if role not in ("user", "assistant", "system"):
             continue
-        content = message.get("content") or ""
-        if content:
-            result.append({"role": role, "content": content})
+        text, images = _merge_message_text(
+            message.get("content") or "", message.get("attachments") or []
+        )
+        if images:
+            parts: list[dict] = [
+                {"type": "text", "text": text or "请查看附件。"}
+            ]
+            for _, mime_type, data in images:
+                parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": _image_data_url(mime_type, data)},
+                    }
+                )
+            result.append({"role": role, "content": parts})
+        elif text:
+            result.append({"role": role, "content": text})
     return result
 
 
@@ -170,12 +234,34 @@ def _anthropic_payload(
     max_tokens: int,
     temperature: float,
 ) -> dict:
-    converted: list[dict[str, str]] = []
+    converted: list[dict] = []
     for message in messages:
         role = message.get("role")
-        content = message.get("content") or ""
-        if role in ("user", "assistant") and content:
-            converted.append({"role": role, "content": content})
+        if role not in ("user", "assistant"):
+            continue
+        text, images = _merge_message_text(
+            message.get("content") or "", message.get("attachments") or []
+        )
+        if not text and not images:
+            continue
+        if images:
+            blocks: list[dict] = []
+            if text:
+                blocks.append({"type": "text", "text": text})
+            for _, mime_type, data in images:
+                blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": mime_type or "image/png",
+                            "data": base64.b64encode(data).decode("ascii"),
+                        },
+                    }
+                )
+            converted.append({"role": role, "content": blocks})
+        else:
+            converted.append({"role": role, "content": text})
     payload: dict = {
         "model": provider.model,
         "max_tokens": max(1, max_tokens),
@@ -210,11 +296,27 @@ def _gemini_payload(
     contents: list[dict] = []
     for message in messages:
         role = message.get("role")
-        content = message.get("content") or ""
-        if role not in ("user", "assistant") or not content:
+        if role not in ("user", "assistant"):
             continue
+        text, images = _merge_message_text(
+            message.get("content") or "", message.get("attachments") or []
+        )
+        if not text and not images:
+            continue
+        parts: list[dict] = []
+        if text:
+            parts.append({"text": text})
+        for _, mime_type, data in images:
+            parts.append(
+                {
+                    "inline_data": {
+                        "mime_type": mime_type or "image/png",
+                        "data": base64.b64encode(data).decode("ascii"),
+                    }
+                }
+            )
         contents.append(
-            {"role": "model" if role == "assistant" else "user", "parts": [{"text": content}]}
+            {"role": "model" if role == "assistant" else "user", "parts": parts}
         )
     payload: dict = {
         "contents": contents,
@@ -740,10 +842,7 @@ def _consume_gemini_chunk(
 
 
 def _estimate_prompt(provider: Provider, messages: list[dict]) -> int:
-    total = estimate_tokens(provider.system_prompt)
-    for message in messages:
-        total += estimate_tokens(message.get("content") or "") + 5
-    return total
+    return context_tokens(messages, provider.system_prompt)
 
 
 def _payload_error(payload: dict) -> str:

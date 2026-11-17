@@ -28,17 +28,77 @@ def estimate_tokens(text: str | None) -> int:
     return max(1, int(math.ceil(value)))
 
 
-def message_tokens(role: str, content: str) -> int:
+IMAGE_TOKEN_ESTIMATE = 850
+
+
+def attachment_tokens(attachment) -> int:
+    """Estimate the context cost of one attachment."""
+    token_count = getattr(attachment, "token_count", 0)
+    if token_count:
+        return int(token_count)
+    if isinstance(attachment, dict):
+        token_count = attachment.get("token_count") or 0
+        if token_count:
+            return int(token_count)
+        kind = attachment.get("kind", "file")
+        data = attachment.get("data") or b""
+    else:
+        kind = getattr(attachment, "kind", "file")
+        data = getattr(attachment, "data", b"") or b""
+    if kind == "image":
+        return IMAGE_TOKEN_ESTIMATE
+    if kind == "text":
+        if isinstance(data, str):
+            return estimate_tokens(data) + 4
+        try:
+            text = data.decode("utf-8", errors="replace") if isinstance(data, (bytes, bytearray)) else ""
+        except Exception:
+            text = ""
+        return estimate_tokens(text) + 4
+    return 48
+
+
+def attachment_tokens_total(attachments) -> int:
+    return sum(attachment_tokens(item) for item in attachments or [])
+
+
+def content_text(content) -> str:
+    """Flatten plain text or an OpenAI-style content-part list."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                if isinstance(item.get("text"), str):
+                    parts.append(item["text"])
+                elif isinstance(item.get("content"), (str, list)):
+                    parts.append(content_text(item["content"]))
+        return "".join(parts)
+    return ""
+
+
+def message_tokens(role: str, content, attachments=None) -> int:
     # Chat formats add a handful of structural tokens per message.
-    return estimate_tokens(content) + (5 if role in ("user", "assistant") else 4)
+    total = estimate_tokens(content_text(content)) + (5 if role in ("user", "assistant") else 4)
+    total += attachment_tokens_total(attachments)
+    return total
 
 
 def context_tokens(messages, system_prompt: str = "") -> int:
     total = estimate_tokens(system_prompt) + (6 if system_prompt else 0)
     for message in messages:
-        role = getattr(message, "role", None) if not isinstance(message, dict) else message.get("role", "")
-        content = getattr(message, "content", None) if not isinstance(message, dict) else message.get("content", "")
-        total += message_tokens(role or "", content or "")
+        if isinstance(message, dict):
+            role = message.get("role", "")
+            content = message.get("content", "")
+            attachments = message.get("attachments") or []
+        else:
+            role = getattr(message, "role", "")
+            content = getattr(message, "content", "")
+            attachments = getattr(message, "attachments", []) or []
+        total += message_tokens(role or "", content or "", attachments)
     return total
 
 

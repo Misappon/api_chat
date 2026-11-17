@@ -5,25 +5,30 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
-from ..models import Message
-from ..tokens import estimate_tokens, format_tokens
-from .theme import full_time
-from .widgets import IconButton, MarkdownView
+from ..attachment_utils import format_bytes
+from ..models import Attachment, Message
+from ..tokens import attachment_tokens_total, estimate_tokens, format_tokens
+from .icons import icon
+from .theme import MUTED, full_time
+from .widgets import IconButton, ImageThumbnail, MarkdownView
 
 
 class MessageBubble(QWidget):
     edit_requested = Signal(int, str, str)
     copy_requested = Signal(str)
+    attachment_clicked = Signal(int)
     regenerate_requested = Signal(int)
 
     def __init__(
@@ -36,6 +41,8 @@ class MessageBubble(QWidget):
         created_at: Optional[datetime] = None,
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
+        token_count: int = 0,
+        attachments: Optional[list[Attachment]] = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -46,6 +53,8 @@ class MessageBubble(QWidget):
         self.created_at = created_at or datetime.now()
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
+        self.token_count = token_count
+        self.attachments = attachments or []
         self.streaming = message_id == 0
         self._build()
 
@@ -97,10 +106,15 @@ class MessageBubble(QWidget):
         )
         bubble_layout = QVBoxLayout(self.bubble)
         bubble_layout.setContentsMargins(14, 10, 14, 7)
-        bubble_layout.setSpacing(3)
+        bubble_layout.setSpacing(5)
+
+        if self.attachments:
+            bubble_layout.addWidget(self._build_attachments())
 
         self.view = MarkdownView()
         self.view.set_markdown(self.content, streaming=self.streaming)
+        if not self.content.strip() and not self.streaming:
+            self.view.hide()
         bubble_layout.addWidget(self.view)
 
         footer = QHBoxLayout()
@@ -141,9 +155,50 @@ class MessageBubble(QWidget):
             root.addWidget(avatar, 0, Qt.AlignmentFlag.AlignTop)
             root.addWidget(column, 1, Qt.AlignmentFlag.AlignTop)
 
+    def _build_attachments(self) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        images = [attachment for attachment in self.attachments if attachment.is_image]
+        files = [attachment for attachment in self.attachments if not attachment.is_image]
+        if images:
+            grid = QGridLayout()
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(6)
+            for index, attachment in enumerate(images):
+                thumb = ImageThumbnail(attachment)
+                thumb.clicked.connect(self.attachment_clicked)
+                grid.addWidget(thumb, index // 2, index % 2, Qt.AlignmentFlag.AlignLeft)
+            layout.addLayout(grid)
+        for attachment in files:
+            button = QPushButton(
+                f"  {attachment.filename}  ·  {format_bytes(attachment.size_bytes)}"
+            )
+            button.setObjectName("messageFileButton")
+            button.setIcon(icon("file", MUTED, 15))
+            button.setIconSize(QSize(15, 15))
+            button.setMaximumWidth(440)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed
+            )
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setToolTip(f"打开附件：{attachment.filename}")
+            button.clicked.connect(
+                lambda _checked=False, attachment_id=attachment.id: self.attachment_clicked.emit(
+                    attachment_id
+                )
+            )
+            layout.addWidget(button)
+        return container
+
     def _usage_text(self) -> str:
         if self.role == "user":
-            return f"约 {format_tokens(estimate_tokens(self.content))} tokens"
+            tokens = self.token_count or (
+                estimate_tokens(self.content) + attachment_tokens_total(self.attachments)
+            )
+            return f"约 {format_tokens(tokens)} tokens"
         if self.prompt_tokens or self.completion_tokens:
             return (
                 f"输入 {format_tokens(self.prompt_tokens)} · "
@@ -200,5 +255,7 @@ class MessageBubble(QWidget):
             created_at=message.created_at,
             prompt_tokens=message.prompt_tokens,
             completion_tokens=message.completion_tokens,
+            token_count=message.token_count,
+            attachments=message.attachments,
             parent=parent,
         )

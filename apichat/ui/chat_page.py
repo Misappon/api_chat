@@ -6,11 +6,13 @@ from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeyEvent
+from PySide6.QtGui import QAction, QImage, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -24,17 +26,25 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..models import Conversation, Message, Provider
-from ..tokens import estimate_tokens, format_tokens
+from ..attachment_utils import (
+    MAX_ATTACHMENTS,
+    AttachmentError,
+    attachment_from_path,
+    image_attachment_from_qimage,
+)
+from ..models import Attachment, Conversation, Message, Provider
+from ..tokens import attachment_tokens_total, estimate_tokens, format_tokens
 from .icons import icon
 from .message_bubble import MessageBubble
 from .theme import FAINT, MUTED
-from .widgets import ContextPill, IconButton, Toast
+from .widgets import AttachmentChip, ContextPill, IconButton, Toast
 
 
 class ComposerEdit(QPlainTextEdit):
     submit = Signal()
     focus_changed = Signal(bool)
+    files_dropped = Signal(list)
+    image_pasted = Signal(QImage)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -43,9 +53,40 @@ class ComposerEdit(QPlainTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTabChangesFocus(True)
+        self.setAcceptDrops(True)
         self.document().setDocumentMargin(2)
         self.setFixedHeight(30)
         self.textChanged.connect(self._adjust_height)
+
+    def insertFromMimeData(self, source) -> None:  # noqa: N802 (Qt API)
+        if source.hasImage():
+            image = source.imageData()
+            if isinstance(image, QImage) and not image.isNull():
+                self.image_pasted.emit(image)
+                return
+        super().insertFromMimeData(source)
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if event.mimeData().hasUrls() or event.mimeData().hasImage():
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        mime = event.mimeData()
+        if mime.hasImage():
+            image = mime.imageData()
+            if isinstance(image, QImage) and not image.isNull():
+                self.image_pasted.emit(image)
+                event.acceptProposedAction()
+                return
+        if mime.hasUrls():
+            paths = [url.toLocalFile() for url in mime.urls() if url.isLocalFile()]
+            if paths:
+                self.files_dropped.emit(paths)
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
 
     def _adjust_height(self) -> None:
         height = int(self.document().size().height()) + 8
@@ -71,9 +112,11 @@ class ComposerEdit(QPlainTextEdit):
 
 
 class ChatPage(QWidget):
-    send_requested = Signal(str)
+    send_requested = Signal(str, object)
     stop_requested = Signal()
     edit_requested = Signal(int, str, str)
+    attachment_preview_requested = Signal(int)
+    export_requested = Signal()
     provider_changed = Signal(int)
     title_changed = Signal(str)
     new_chat_requested = Signal()
@@ -89,6 +132,7 @@ class ChatPage(QWidget):
         self.current: Optional[Conversation] = None
         self.messages: list[Message] = []
         self._providers: list[Provider] = []
+        self._draft_attachments: list[Attachment] = []
         self._loading = False
         self._generating = False
         self._stream_bubble: Optional[MessageBubble] = None
@@ -266,15 +310,32 @@ class ChatPage(QWidget):
         self.composer.setMinimumWidth(420)
         composer_layout = QVBoxLayout(self.composer)
         composer_layout.setContentsMargins(12, 8, 9, 7)
-        composer_layout.setSpacing(2)
+        composer_layout.setSpacing(3)
+
+        self.attachments_bar = QWidget()
+        self.attachments_layout = QGridLayout(self.attachments_bar)
+        self.attachments_layout.setContentsMargins(0, 0, 0, 2)
+        self.attachments_layout.setHorizontalSpacing(5)
+        self.attachments_layout.setVerticalSpacing(5)
+        self.attachments_layout.setColumnStretch(3, 1)
+        self.attachments_bar.hide()
+        composer_layout.addWidget(self.attachments_bar)
+
         self.edit = ComposerEdit()
         self.edit.submit.connect(self._on_send_clicked)
         self.edit.textChanged.connect(self._update_token_hint)
         self.edit.focus_changed.connect(self._on_composer_focus)
+        self.edit.files_dropped.connect(self.add_attachment_paths)
+        self.edit.image_pasted.connect(self.add_pasted_image)
         composer_layout.addWidget(self.edit)
         composer_footer = QHBoxLayout()
         composer_footer.setContentsMargins(2, 0, 1, 0)
         composer_footer.setSpacing(6)
+        self.attach_button = IconButton(
+            "paperclip", tooltip="添加图片或文本附件（也可拖入、粘贴图片）", size=16
+        )
+        self.attach_button.clicked.connect(self.choose_attachments)
+        composer_footer.addWidget(self.attach_button)
         self.hint = QLabel("Enter 发送 · Shift+Enter 换行")
         self.hint.setObjectName("composerHint")
         composer_footer.addWidget(self.hint)
@@ -344,14 +405,87 @@ class ChatPage(QWidget):
         finally:
             self._loading = False
 
+    def choose_attachments(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "添加附件",
+            "",
+            "图片 (*.png *.jpg *.jpeg *.webp *.gif *.bmp);;"
+            "文本与代码 (*.txt *.md *.py *.js *.ts *.json *.csv *.html *.css "
+            "*.yaml *.yml *.xml *.sql *.log);;所有文件 (*.*)",
+        )
+        if paths:
+            self.add_attachment_paths(paths)
+
+    def add_attachment_paths(self, paths: list[str]) -> None:
+        added = 0
+        errors: list[str] = []
+        for path in paths:
+            if len(self._draft_attachments) >= MAX_ATTACHMENTS:
+                self.show_toast(f"每条消息最多添加 {MAX_ATTACHMENTS} 个附件")
+                break
+            try:
+                attachment = attachment_from_path(path)
+            except AttachmentError as exc:
+                errors.append(str(exc))
+                continue
+            self._draft_attachments.append(attachment)
+            added += 1
+        self._render_attachments()
+        if errors:
+            self.show_toast(errors[0])
+        elif added:
+            self._update_token_hint()
+
+    def add_pasted_image(self, image: QImage) -> None:
+        if len(self._draft_attachments) >= MAX_ATTACHMENTS:
+            self.show_toast(f"每条消息最多添加 {MAX_ATTACHMENTS} 个附件")
+            return
+        try:
+            filename = f"粘贴的图片 {datetime.now().strftime('%H%M%S')}.png"
+            attachment = image_attachment_from_qimage(image, filename)
+        except AttachmentError as exc:
+            self.show_toast(str(exc))
+            return
+        self._draft_attachments.append(attachment)
+        self._render_attachments()
+
+    def _render_attachments(self) -> None:
+        while self.attachments_layout.count():
+            item = self.attachments_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
+        for index, attachment in enumerate(self._draft_attachments):
+            chip = AttachmentChip(attachment, index)
+            chip.remove_requested.connect(self._remove_draft)
+            self.attachments_layout.addWidget(chip, index // 3, index % 3)
+        self.attachments_bar.setVisible(bool(self._draft_attachments))
+        self._update_token_hint()
+
+    def _remove_draft(self, index: int) -> None:
+        if 0 <= index < len(self._draft_attachments):
+            del self._draft_attachments[index]
+            self._render_attachments()
+
+    def _clear_drafts(self) -> None:
+        self._draft_attachments.clear()
+        self._render_attachments()
+
     def load_conversation(
         self,
         conversation: Conversation,
         messages: list[Message],
         providers: list[Provider],
+        *,
+        preserve_drafts: bool = False,
     ) -> None:
         self.current = conversation
         self.messages = list(messages)
+        if not preserve_drafts:
+            self._clear_drafts()
         self._loading = True
         self.set_providers(providers, conversation.api_id)
         self.title_edit.setText(conversation.title)
@@ -381,6 +515,7 @@ class ChatPage(QWidget):
         self.current = None
         self.messages = []
         self._clear_messages()
+        self._clear_drafts()
         self._show_empty(has_providers=has_providers, no_conversation=True)
 
     def _show_empty(self, *, has_providers: bool, no_conversation: bool) -> None:
@@ -404,6 +539,7 @@ class ChatPage(QWidget):
 
     def set_generating(self, generating: bool) -> None:
         self._generating = generating
+        self.attach_button.setEnabled(not generating)
         self.send_button.setObjectName("stopButton" if generating else "sendButton")
         self.send_button.setIcon(
             icon("stop", "#FF9BB0", 17) if generating else icon("send", "#FFFFFF", 17)
@@ -490,6 +626,7 @@ class ChatPage(QWidget):
 
     def clear_composer(self) -> None:
         self.edit.clear()
+        self._clear_drafts()
         self.edit.setFocus()
 
     def show_error(self, text: str, *, can_retry: bool = True) -> None:
@@ -532,6 +669,7 @@ class ChatPage(QWidget):
     def _add_bubble(self, bubble: MessageBubble) -> None:
         bubble.edit_requested.connect(self.edit_requested)
         bubble.copy_requested.connect(self._copy)
+        bubble.attachment_clicked.connect(self.attachment_preview_requested)
         self._insert_bubble(bubble)
 
     def _insert_bubble(self, bubble: MessageBubble) -> None:
@@ -592,12 +730,12 @@ class ChatPage(QWidget):
             self.stop_requested.emit()
             return
         text = self.edit.toPlainText().strip()
-        if not text:
+        if not text and not self._draft_attachments:
             return
         if not self.current:
             self.new_chat_requested.emit()
             return
-        self.send_requested.emit(text)
+        self.send_requested.emit(text, list(self._draft_attachments))
 
     def _on_provider_changed(self, index: int) -> None:
         if self._loading or index < 0:
@@ -636,7 +774,11 @@ class ChatPage(QWidget):
     def _update_token_hint(self) -> None:
         text = self.edit.toPlainText()
         value = estimate_tokens(text) if text.strip() else 0
-        self.token_hint.setText(f"约 {format_tokens(value)} tokens")
+        value += attachment_tokens_total(self._draft_attachments)
+        suffix = ""
+        if self._draft_attachments:
+            suffix = f" · {len(self._draft_attachments)} 附件"
+        self.token_hint.setText(f"{format_tokens(value)} tokens{suffix}")
 
     def _show_more_menu(self) -> None:
         menu = QMenu(self)
@@ -644,9 +786,12 @@ class ChatPage(QWidget):
         regen.triggered.connect(self.regenerate_title_requested)
         clear = QAction(icon("refresh", MUTED, 15), "清空当前对话", menu)
         clear.triggered.connect(self.clear_requested)
+        export = QAction(icon("download", MUTED, 15), "导出为文本文件", menu)
+        export.triggered.connect(self.export_requested)
         api = QAction(icon("api", MUTED, 15), "API 管理", menu)
         api.triggered.connect(self.api_manager_requested)
         menu.addAction(regen)
+        menu.addAction(export)
         menu.addAction(clear)
         menu.addSeparator()
         delete = QAction(icon("trash", "#FF7483", 15), "删除当前对话", menu)

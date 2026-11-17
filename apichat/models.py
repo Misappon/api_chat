@@ -58,6 +58,26 @@ class Conversation:
 
 
 @dataclass
+class Attachment:
+    id: int = 0
+    message_id: int = 0
+    filename: str = ""
+    mime_type: str = ""
+    kind: str = "file"
+    size_bytes: int = 0
+    width: int = 0
+    height: int = 0
+    token_count: int = 0
+    data: bytes = b""
+    thumbnail: bytes = b""
+    created_at: Optional[datetime] = None
+
+    @property
+    def is_image(self) -> bool:
+        return self.kind == "image" or self.mime_type.startswith("image/")
+
+
+@dataclass
 class Message:
     id: int
     conversation_id: int
@@ -70,6 +90,7 @@ class Message:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     usage_total: int = 0
+    attachments: list[Attachment] = field(default_factory=list)
 
     @property
     def is_user(self) -> bool:

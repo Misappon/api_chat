@@ -123,6 +123,20 @@ QPushButton#newChat {{
 }}
 QPushButton#newChat:hover {{ background-color: {ACCENT_HOVER}; }}
 QPushButton#newChat:pressed {{ background-color: #5874DF; }}
+QPushButton#newMore {{
+    background-color: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 0;
+}}
+QPushButton#newMore:hover {{
+    background-color: {SURFACE_3};
+    border-color: #3A4A68;
+}}
+QPushButton#newMore:disabled {{
+    background-color: #111721;
+    border-color: {BORDER_SOFT};
+}}
 
 QListWidget#conversationList {{
     background: transparent;
@@ -415,6 +429,42 @@ QPushButton#retryButton {{
     font-weight: 600;
 }}
 QPushButton#retryButton:hover {{ background-color: #4A2A3B; }}
+
+QFrame#attachmentChip {{
+    background-color: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QLabel#attachmentPreview {{
+    background-color: #0D131D;
+    border-radius: 6px;
+}}
+QLabel#attachmentName {{
+    color: {TEXT};
+    font-size: 10px;
+}}
+QLabel#attachmentMeta {{
+    color: {FAINT};
+    font-size: 9px;
+}}
+QLabel#messageImage {{
+    background-color: #0D131D;
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QPushButton#messageFileButton {{
+    background-color: {SURFACE_2};
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 7px;
+    color: {MUTED};
+    padding: 5px 8px;
+    text-align: left;
+    font-size: 10px;
+}}
+QPushButton#messageFileButton:hover {{
+    border-color: {BORDER};
+    color: {TEXT};
+}}
 QLabel#emptyTitle {{
     color: {TEXT};
     font-size: 23px;
