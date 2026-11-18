@@ -37,6 +37,7 @@ from bs4 import BeautifulSoup
 
 BING_URL = "https://cn.bing.com/search"
 DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
+TAVILY_URL = "https://api.tavily.com/search"
 MAX_QUERY_CHARS = 500
 MAX_RESULTS = 5
 MAX_TOTAL_RESULTS = 12
@@ -61,15 +62,72 @@ DEFAULT_SEARCH_SOURCES = [
 ]
 
 
-def normalise_search_sources(raw: object) -> list[dict[str, str]]:
+SEARCH_SOURCE_TYPES = ("bing", "duckduckgo", "searxng", "tavily")
+_HIDDEN_PREFIX = "••••"
+
+
+def _redact_key(value: str) -> str:
+    value = (value or "").strip()
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return _HIDDEN_PREFIX
+    return f"{_HIDDEN_PREFIX}{value[-4:]}"
+
+
+def merge_secrets(new_sources: list[dict], previous: list[dict]) -> list[dict]:
+    """Keep a previously stored Tavily key when the UI re-sends a redacted one."""
+    lookup = {
+        str(item.get("id") or ""): str(item.get("api_key") or "")
+        for item in previous or []
+        if isinstance(item, dict)
+    }
+    type_lookup = {
+        str(item.get("type") or ""): str(item.get("api_key") or "")
+        for item in previous or []
+        if isinstance(item, dict) and item.get("api_key")
+    }
+    merged: list[dict] = []
+    for source in new_sources:
+        data = dict(source)
+        if data.get("type") == "tavily":
+            key = str(data.get("api_key") or "")
+            if not key or key.startswith(_HIDDEN_PREFIX):
+                data["api_key"] = lookup.get(
+                    str(data.get("id") or ""), ""
+                ) or type_lookup.get("tavily", "")
+        merged.append(data)
+    return merged
+
+
+def display_search_sources(sources: object) -> list[dict[str, str]]:
+    """Copy of the config with API keys masked, safe to send to the UI."""
+    result = []
+    for item in normalise_search_sources(sources):
+        data = dict(item)
+        if data.get("api_key"):
+            data["api_key"] = _redact_key(data["api_key"])
+        result.append(data)
+    return result
+
+
+def normalise_search_sources(raw: object) -> list[dict]:
     """Validate/clamp the JSON shape used by the dashboard and config."""
     if not isinstance(raw, list) or not raw:
         return [
-            {"id": source.source_id, "type": source.type, "label": source.label, "endpoint": source.endpoint}
+            {
+                "id": source.source_id,
+                "type": source.type,
+                "label": source.label,
+                "endpoint": source.endpoint,
+                "enabled": True,
+                "api_key": "",
+            }
             for source in DEFAULT_SEARCH_SOURCES
         ]
-    result: list[dict[str, str]] = []
+    result: list[dict] = []
     seen: set[tuple[str, str]] = set()
+    kinds: set[str] = set()
     for item in raw[:8]:
         if isinstance(item, SearchSource):
             data = {
@@ -77,6 +135,8 @@ def normalise_search_sources(raw: object) -> list[dict[str, str]]:
                 "type": item.type,
                 "label": item.label,
                 "endpoint": item.endpoint,
+                "enabled": True,
+                "api_key": "",
             }
         elif isinstance(item, dict):
             data = {
@@ -84,29 +144,45 @@ def normalise_search_sources(raw: object) -> list[dict[str, str]]:
                 "type": str(item.get("type") or ""),
                 "label": str(item.get("label") or ""),
                 "endpoint": str(item.get("endpoint") or ""),
+                "enabled": bool(item.get("enabled", True)),
+                "api_key": str(item.get("api_key") or ""),
             }
         else:
             continue
         kind = data["type"].lower()
-        if kind not in {"bing", "duckduckgo", "searxng"}:
+        if kind not in SEARCH_SOURCE_TYPES:
             continue
         if kind == "bing":
-            data.update(id="bing", label="Bing", endpoint=BING_URL)
+            data.update(id="bing", label="Bing", endpoint=BING_URL, api_key="")
         elif kind == "duckduckgo":
-            data.update(id="duckduckgo", label="DuckDuckGo", endpoint=DUCKDUCKGO_URL)
+            data.update(
+                id="duckduckgo", label="DuckDuckGo", endpoint=DUCKDUCKGO_URL, api_key=""
+            )
+        elif kind == "tavily":
+            data.update(id="tavily", label="Tavily", endpoint=TAVILY_URL)
         else:
             if not _is_public_https_url(data["endpoint"]):
                 continue
             data["label"] = (data["label"] or "SearXNG")[:80]
             data["id"] = data["id"] or f"searxng-{len(result) + 1}"
-        key = (kind, data["endpoint"])
-        if key in seen:
+            data["api_key"] = ""
+        if kind in {"bing", "duckduckgo", "tavily"} and kind in kinds:
             continue
-        seen.add(key)
+        if (kind, data["endpoint"]) in seen:
+            continue
+        seen.add((kind, data["endpoint"]))
+        kinds.add(kind)
         result.append(data)
     if not result:
         return [
-            {"id": source.source_id, "type": source.type, "label": source.label, "endpoint": source.endpoint}
+            {
+                "id": source.source_id,
+                "type": source.type,
+                "label": source.label,
+                "endpoint": source.endpoint,
+                "enabled": True,
+                "api_key": "",
+            }
             for source in DEFAULT_SEARCH_SOURCES
         ]
     return result
@@ -276,11 +352,90 @@ def _request_headers() -> dict[str, str]:
     }
 
 
+def _parse_tavily_json(payload: object, max_results: int) -> list[SearchResult]:
+    if not isinstance(payload, dict):
+        return []
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    for item in payload.get("results") or []:
+        if not isinstance(item, dict) or not item.get("url"):
+            continue
+        url = _safe_url(str(item["url"]))
+        if not url or url in seen:
+            continue
+        title = _clean(str(item.get("title") or ""), MAX_TITLE_CHARS)
+        snippet = _clean(
+            str(item.get("content") or item.get("raw_content") or ""),
+            MAX_SNIPPET_CHARS,
+        )
+        if not title:
+            continue
+        seen.add(url)
+        results.append(SearchResult(title=title, url=url, snippet=snippet))
+        if len(results) >= max_results:
+            break
+    return results
+
+
+def _tavily_search(
+    source: dict[str, str], query: str, max_results: int, timeout: float
+) -> list[SearchResult]:
+    api_key = str(source.get("api_key") or "").strip()
+    if not api_key:
+        raise WebSearchError("未填写 Tavily API Key")
+    body = {
+        "query": query,
+        "max_results": max(1, min(int(max_results), 10)),
+        "search_depth": "basic",
+        "include_answer": False,
+        "include_raw_content": False,
+    }
+    headers = _request_headers()
+    headers.update(
+        {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+    )
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(timeout, connect=8.0),
+            follow_redirects=False,
+            trust_env=True,
+            headers=headers,
+        ) as client:
+            response = client.post(TAVILY_URL, json=body)
+            response.raise_for_status()
+            if len(response.content) > 3 * 1024 * 1024:
+                raise WebSearchError("返回内容过大，已停止读取。")
+            try:
+                results = _parse_tavily_json(response.json(), max_results)
+            except ValueError:
+                results = []
+    except WebSearchError:
+        raise
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        hints = {
+            401: "API Key 无效",
+            403: "API Key 无权限",
+            429: "额度用尽或请求过于频繁",
+        }
+        raise WebSearchError(hints.get(code, f"HTTP {code}")) from exc
+    except httpx.HTTPError as exc:
+        raise WebSearchError(f"无法连接：{exc}") from exc
+    if not results:
+        raise WebSearchError("没有找到相关网页结果")
+    return results
+
+
 def _search_one(
     source: dict[str, str], query: str, max_results: int, timeout: float
 ) -> list[SearchResult]:
     kind = source.get("type")
     endpoint = source.get("endpoint") or ""
+    if kind == "tavily":
+        return _tavily_search(source, query, max_results, timeout)
     if kind == "bing":
         url = BING_URL
         params = {"q": query, "mkt": "zh-CN", "setlang": "zh-hans"}
@@ -354,7 +509,10 @@ def search_configured(
     all_results: list[SearchResult] = []
     seen: set[str] = set()
     errors: list[str] = []
-    for source in source_list:
+    active = [source for source in source_list if source.get("enabled", True)]
+    if not active:
+        raise WebSearchError("没有启用的搜索源，请在综合控制台中启用至少一个。")
+    for source in active:
         try:
             results = _search_one(source, query, max_results, timeout)
         except WebSearchError as exc:

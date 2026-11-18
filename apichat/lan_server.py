@@ -36,6 +36,7 @@ from .repository import Repository
 from .tokens import context_tokens, estimate_tokens
 from .web_search import (
     WebSearchError,
+    normalise_search_sources,
     search_configured,
     search_context,
     with_search_context,
@@ -612,7 +613,7 @@ class LanShareServer:
         if self.search_sources_getter is None:
             return None
         try:
-            return self.search_sources_getter()
+            return normalise_search_sources(self.search_sources_getter())
         except Exception:
             return None
 

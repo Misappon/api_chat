@@ -31,6 +31,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "type": "bing",
             "label": "Bing",
             "endpoint": "https://cn.bing.com/search",
+            "enabled": True,
+            "api_key": "",
         }
     ],
     "window": {"width": 1320, "height": 860, "x": None, "y": None},

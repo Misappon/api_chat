@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -149,6 +150,7 @@ class DashboardPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._font_scale = 1.0
+        self._updating_search_list = False
         self._build()
 
     def _build(self) -> None:
@@ -287,6 +289,7 @@ class DashboardPage(QWidget):
         self.search_list.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection
         )
+        self.search_list.itemChanged.connect(self._on_search_item_changed)
         search_body.addWidget(self.search_list, 1)
         search_controls = QVBoxLayout()
         search_controls.setSpacing(4)
@@ -297,6 +300,7 @@ class DashboardPage(QWidget):
         self.search_type_combo.addItem("Bing", "bing")
         self.search_type_combo.addItem("DuckDuckGo", "duckduckgo")
         self.search_type_combo.addItem("SearXNG", "searxng")
+        self.search_type_combo.addItem("Tavily", "tavily")
         source_row.addWidget(self.search_type_combo)
         add_source = QPushButton("添加")
         add_source.setObjectName("smallButton")
@@ -311,10 +315,14 @@ class DashboardPage(QWidget):
         down = QPushButton("↓ 下移")
         down.setObjectName("smallButton")
         down.clicked.connect(lambda: self._move_search_source(1))
+        edit_key = QPushButton("填 Key")
+        edit_key.setObjectName("smallButton")
+        edit_key.setToolTip("为选中的 Tavily 搜索源填写或更换 API Key")
+        edit_key.clicked.connect(self._edit_tavily_key)
         remove = QPushButton("删除")
         remove.setObjectName("smallButton")
         remove.clicked.connect(self._remove_search_source)
-        for button in (up, down, remove):
+        for button in (up, down, edit_key, remove):
             order_row.addWidget(button)
         search_controls.addLayout(order_row)
         search_body.addLayout(search_controls)
@@ -552,27 +560,65 @@ class DashboardPage(QWidget):
                 result.append(dict(data))
         return result
 
-    def _render_search_sources(self, sources: list[dict[str, str]], select_row: int = -1) -> None:
+    def _render_search_sources(self, sources: list[dict], select_row: int = -1) -> None:
+        self._updating_search_list = True
+        self.search_list.blockSignals(True)
         self.search_list.clear()
         for index, source in enumerate(sources):
-            item = QListWidgetItem(f"{index + 1}. {source.get('label') or source.get('type')}")
+            enabled = source.get("enabled", True)
+            mark = "✓" if enabled else "✗"
+            key_hint = ""
+            if source.get("type") == "tavily":
+                key_hint = " · 已配置 Key" if source.get("api_key") else " · 未配置 Key"
+            item = QListWidgetItem(
+                f"{index + 1}. {source.get('label') or source.get('type')}  {mark}{key_hint}"
+            )
+            if not enabled:
+                item.setForeground(QColor(FAINT))
+            hint = "已启用" if enabled else "已禁用（不参与搜索）"
+            tooltip = f"{hint}\n{source.get('endpoint') or ''}"
+            if key_hint:
+                tooltip += f"\n{key_hint.strip(' ·')}"
+            item.setToolTip(tooltip)
             item.setData(Qt.ItemDataRole.UserRole, dict(source))
-            item.setToolTip(source.get("endpoint") or "")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.CheckState.Checked if enabled else Qt.CheckState.Unchecked
+            )
             self.search_list.addItem(item)
         if 0 <= select_row < self.search_list.count():
             self.search_list.setCurrentRow(select_row)
+        self.search_list.blockSignals(False)
+        self._updating_search_list = False
+
+    def _on_search_item_changed(self, item: QListWidgetItem) -> None:
+        if self._updating_search_list:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        enabled = item.checkState() == Qt.CheckState.Checked
+        if bool(data.get("enabled", True)) == enabled:
+            return
+        row = self.search_list.row(item)
+        sources = self._current_search_sources()
+        sources[row]["enabled"] = enabled
+        self._commit_search_sources(sources, select_row=row)
 
     def set_search_sources(self, sources: object) -> None:
         self._render_search_sources(normalise_search_sources(sources))
 
-    def _commit_search_sources(self, sources: list[dict[str, str]]) -> None:
+    def _commit_search_sources(
+        self, sources: list[dict], *, select_row: int = -1
+    ) -> None:
         sources = normalise_search_sources(sources)
-        self._render_search_sources(sources)
+        self._render_search_sources(sources, select_row=select_row)
         self.search_sources_changed.emit(sources)
 
     def _add_search_source(self) -> None:
         kind = str(self.search_type_combo.currentData() or "bing")
         endpoint = ""
+        api_key = ""
         if kind == "searxng":
             endpoint, ok = QInputDialog.getText(
                 self,
@@ -582,25 +628,61 @@ class DashboardPage(QWidget):
             if not ok or not endpoint.strip():
                 return
             endpoint = endpoint.strip()
+        elif kind == "tavily":
+            api_key, ok = QInputDialog.getText(
+                self,
+                "添加 Tavily",
+                "Tavily API Key（以 tvly- 开头，保存在本地配置中）：",
+                QLineEdit.EchoMode.Password,
+            )
+            if not ok or not api_key.strip():
+                return
+            api_key = api_key.strip()
         sources = self._current_search_sources()
         before = len(normalise_search_sources(sources))
         sources.append(
             {
                 "id": "",
                 "type": kind,
-                "label": {"bing": "Bing", "duckduckgo": "DuckDuckGo", "searxng": "SearXNG"}.get(
-                    kind, kind
-                ),
+                "label": {
+                    "bing": "Bing",
+                    "duckduckgo": "DuckDuckGo",
+                    "searxng": "SearXNG",
+                    "tavily": "Tavily",
+                }.get(kind, kind),
                 "endpoint": endpoint,
+                "api_key": api_key,
+                "enabled": True,
             }
         )
         normalized = normalise_search_sources(sources)
         if len(normalized) <= before:
             QMessageBox.information(
-                self, "搜索源未添加", "该搜索源已存在，或 SearXNG 地址不是公网 HTTPS 地址。"
+                self,
+                "搜索源未添加",
+                "该搜索源已存在，或 SearXNG 地址不是公网 HTTPS 地址。",
             )
             return
-        self._commit_search_sources(normalized)
+        self._commit_search_sources(normalized, select_row=len(normalized) - 1)
+
+    def _edit_tavily_key(self) -> None:
+        row = self.search_list.currentRow()
+        sources = self._current_search_sources()
+        if row < 0 or sources[row].get("type") != "tavily":
+            QMessageBox.information(self, "无法编辑", "请先选中 Tavily 搜索源。")
+            return
+        api_key, ok = QInputDialog.getText(
+            self,
+            "Tavily API Key",
+            "输入新的 API Key（留空则表示不修改）：",
+            QLineEdit.EchoMode.Password,
+        )
+        if not ok:
+            return
+        api_key = api_key.strip()
+        if api_key:
+            sources[row]["api_key"] = api_key
+        self._commit_search_sources(sources, select_row=row)
 
     def _move_search_source(self, delta: int) -> None:
         row = self.search_list.currentRow()

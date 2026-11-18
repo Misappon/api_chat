@@ -38,7 +38,11 @@ from ..llm import clean_title
 from ..models import CompletionResult, Conversation, Provider
 from ..repository import Repository, RepositoryError
 from ..tokens import context_tokens, estimate_tokens, format_tokens
-from ..web_search import normalise_search_sources
+from ..web_search import (
+    display_search_sources,
+    merge_secrets,
+    normalise_search_sources,
+)
 from ..workers import ChatStreamWorker, TitleWorker
 from .api_dialog import ApiManagerDialog
 from .attachment_preview import AttachmentPreviewDialog
@@ -99,9 +103,16 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             image_mb, text_mb, pdf_mb = 10, 2, 20
         apply_attachment_limits(image_mb, text_mb, pdf_mb)
-        self.search_sources = normalise_search_sources(
-            self.config.get("search_sources")
-        )
+        if self.config.get("search_sources") is None:
+            # New installs start with Bing only and persist that default
+            # immediately, so later UI-only instances cannot overwrite it.
+            self.search_sources = normalise_search_sources(None)
+            self.config.set("search_sources", self.search_sources, save=False)
+            self.config.save()
+        else:
+            self.search_sources = normalise_search_sources(
+                self.config.get("search_sources")
+            )
         app = QApplication.instance()
         if app is not None:
             self._font_scale = apply_font_scale(app, self._font_scale)
@@ -111,7 +122,7 @@ class MainWindow(QMainWindow):
         self._build()
         self.dashboard.set_font_scale(self._font_scale)
         self.dashboard.set_attachment_limits(*attachment_limits_mb(), pdf_limit_mb())
-        self.dashboard.set_search_sources(self.search_sources)
+        self.dashboard.set_search_sources(display_search_sources(self.search_sources))
         self._install_shortcuts()
         self._restore_geometry()
         self._load_all(restore_last=True)
@@ -1217,11 +1228,15 @@ class MainWindow(QMainWindow):
         self._set_status(f"全局字号 {int(round(new_scale * 100))}%")
 
     def set_search_sources(self, sources: object) -> None:
-        self.search_sources = normalise_search_sources(sources)
+        merged = merge_secrets(list(sources or []), self.search_sources)
+        self.search_sources = normalise_search_sources(merged)
         self.config.set("search_sources", self.search_sources, save=False)
         self.config.save()
-        self.dashboard.set_search_sources(self.search_sources)
-        self._set_status(f"搜索源：{' → '.join(s['label'] for s in self.search_sources)}")
+        self.dashboard.set_search_sources(display_search_sources(self.search_sources))
+        active = [s["label"] for s in self.search_sources if s.get("enabled", True)]
+        self._set_status(
+            "搜索源：" + (" → ".join(active) if active else "没有启用的搜索源")
+        )
 
     def set_attachment_limits(self, image_mb: int, text_mb: int, pdf_mb: int) -> None:
         apply_attachment_limits(image_mb, text_mb, pdf_mb)
