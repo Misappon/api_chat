@@ -12,6 +12,7 @@ import httpx
 
 from .attachment_utils import AttachmentError, extract_pdf_text
 from .models import CompletionResult, Provider
+from .reasoning import budget_for_level, effort_for_level
 from .tokens import content_text, context_tokens, estimate_tokens
 
 
@@ -246,6 +247,7 @@ def _anthropic_payload(
     temperature: float,
     *,
     reasoning: bool = False,
+    reasoning_level: int | None = None,
 ) -> dict:
     converted: list[dict] = []
     for message in messages:
@@ -282,8 +284,9 @@ def _anthropic_payload(
         "messages": converted,
         "stream": stream,
     }
-    if reasoning:
-        budget = max(1024, min(8192, max_tokens // 2))
+    level = 3 if reasoning and reasoning_level is None else int(reasoning_level or 0)
+    if level:
+        budget = budget_for_level(level)
         payload["max_tokens"] = max(max_tokens, budget + 1)
         payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
         payload.pop("temperature", None)
@@ -315,6 +318,7 @@ def _gemini_payload(
     temperature: float,
     *,
     reasoning: bool = False,
+    reasoning_level: int | None = None,
 ) -> dict:
     contents: list[dict] = []
     for message in messages:
@@ -348,9 +352,10 @@ def _gemini_payload(
             "maxOutputTokens": max(1, max_tokens),
         },
     }
-    if reasoning:
+    level = 3 if reasoning and reasoning_level is None else int(reasoning_level or 0)
+    if level:
         payload["generationConfig"]["thinkingConfig"] = {
-            "thinkingBudget": 4096,
+            "thinkingBudget": budget_for_level(level),
             "includeThoughts": True,
         }
     if provider.system_prompt.strip():
@@ -366,6 +371,7 @@ class LLMClient:
     def __init__(self, provider: Provider) -> None:
         self.provider = provider
         self._reasoning = False
+        self._reasoning_level = 0
 
     # ------------------------------------------------------------------
     # public API
@@ -379,12 +385,16 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         reasoning: bool = False,
+        reasoning_level: int | None = None,
         on_reasoning: Callable[[str], None] | None = None,
     ) -> CompletionResult:
         provider = self.provider
         if not provider.model.strip():
             raise LLMError("请先在 API 管理中填写模型名称。")
-        self._reasoning = bool(reasoning)
+        if reasoning_level is None:
+            reasoning_level = 3 if reasoning else 0
+        self._reasoning_level = max(0, min(3, int(reasoning_level)))
+        self._reasoning = self._reasoning_level > 0
         max_tokens = int(max_tokens or provider.max_output_tokens or 4096)
         temperature = float(provider.temperature if temperature is None else temperature)
 
@@ -407,11 +417,15 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         reasoning: bool = False,
+        reasoning_level: int | None = None,
     ) -> CompletionResult:
         provider = self.provider
         if not provider.model.strip():
             raise LLMError("请先在 API 管理中填写模型名称。")
-        self._reasoning = bool(reasoning)
+        if reasoning_level is None:
+            reasoning_level = 3 if reasoning else 0
+        self._reasoning_level = max(0, min(3, int(reasoning_level)))
+        self._reasoning = self._reasoning_level > 0
         max_tokens = int(max_tokens or provider.max_output_tokens or 4096)
         temperature = float(provider.temperature if temperature is None else temperature)
         if provider.provider == "anthropic":
@@ -441,7 +455,7 @@ class LLMClient:
             "stream": stream,
         }
         if self._reasoning and not is_deepseek:
-            body["reasoning_effort"] = "medium"
+            body["reasoning_effort"] = effort_for_level(self._reasoning_level)
             body.pop("temperature", None)
         elif self._reasoning and is_deepseek:
             body.pop("temperature", None)
@@ -635,7 +649,7 @@ class LLMClient:
             True,
             max_tokens,
             temperature,
-            reasoning=self._reasoning,
+            reasoning_level=self._reasoning_level,
         )
         handle = self._post_stream(_endpoint(self.provider), body)
         parts: list[str] = []
@@ -719,7 +733,7 @@ class LLMClient:
             False,
             max_tokens,
             temperature,
-            reasoning=self._reasoning,
+            reasoning_level=self._reasoning_level,
         )
         data = self._post_json(_endpoint(self.provider), body)
         content = "".join(
@@ -762,7 +776,11 @@ class LLMClient:
         on_reasoning: Callable[[str], None] | None = None,
     ) -> CompletionResult:
         body = _gemini_payload(
-            self.provider, messages, max_tokens, temperature, reasoning=self._reasoning
+            self.provider,
+            messages,
+            max_tokens,
+            temperature,
+            reasoning_level=self._reasoning_level,
         )
         handle = self._post_stream(_gemini_url(self.provider, True), body)
         parts: list[str] = []
@@ -849,7 +867,11 @@ class LLMClient:
         self, messages: list[dict], max_tokens: int, temperature: float
     ) -> CompletionResult:
         body = _gemini_payload(
-            self.provider, messages, max_tokens, temperature, reasoning=self._reasoning
+            self.provider,
+            messages,
+            max_tokens,
+            temperature,
+            reasoning_level=self._reasoning_level,
         )
         data = self._post_json(_gemini_url(self.provider, False), body)
         text, reasoning, usage, finish_reason = _consume_gemini_chunk(data, {}, "")

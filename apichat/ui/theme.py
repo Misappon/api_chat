@@ -413,6 +413,44 @@ QToolButton#modeToggle:checked {{
     color: {TEXT};
 }}
 QToolButton#modeToggle:disabled {{ color: {FAINT}; }}
+QComboBox#modeCombo {{
+    background-color: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+    color: {MUTED};
+    font-size: 9px;
+    padding: 3px 7px;
+}}
+QComboBox#modeCombo:hover {{ color: {TEXT}; border-color: {ACCENT}; }}
+QComboBox#modeCombo:disabled {{ color: {FAINT}; }}
+QFrame#searchSourceBox {{
+    background-color: {SURFACE};
+    border: 1px solid {BORDER_SOFT};
+    border-radius: 9px;
+}}
+QListWidget#searchSourceList {{
+    background-color: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    font-size: 10px;
+    padding: 2px;
+}}
+QComboBox#searchSourceType {{
+    background-color: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    font-size: 10px;
+    padding: 3px 6px;
+}}
+QPushButton#smallButton {{
+    background-color: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    color: {MUTED};
+    font-size: 9px;
+    padding: 3px 7px;
+}}
+QPushButton#smallButton:hover {{ color: {TEXT}; border-color: {ACCENT}; }}
 QFrame#reasoningBox {{
     background-color: #101722;
     border: 1px solid #26324A;

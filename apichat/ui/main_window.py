@@ -38,6 +38,7 @@ from ..llm import clean_title
 from ..models import CompletionResult, Conversation, Provider
 from ..repository import Repository, RepositoryError
 from ..tokens import context_tokens, estimate_tokens, format_tokens
+from ..web_search import normalise_search_sources
 from ..workers import ChatStreamWorker, TitleWorker
 from .api_dialog import ApiManagerDialog
 from .attachment_preview import AttachmentPreviewDialog
@@ -79,7 +80,7 @@ class MainWindow(QMainWindow):
         self._stream_messages: list[dict] = []
         self._stream_buffer = ""
         self._stream_reasoning_buffer = ""
-        self._reasoning_mode = False
+        self._reasoning_level = 0
         self._web_search_mode = False
         self._title_workers: dict[int, TitleWorker] = {}
         self._epoch = 0
@@ -98,6 +99,9 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             image_mb, text_mb, pdf_mb = 10, 2, 20
         apply_attachment_limits(image_mb, text_mb, pdf_mb)
+        self.search_sources = normalise_search_sources(
+            self.config.get("search_sources")
+        )
         app = QApplication.instance()
         if app is not None:
             self._font_scale = apply_font_scale(app, self._font_scale)
@@ -107,6 +111,7 @@ class MainWindow(QMainWindow):
         self._build()
         self.dashboard.set_font_scale(self._font_scale)
         self.dashboard.set_attachment_limits(*attachment_limits_mb(), pdf_limit_mb())
+        self.dashboard.set_search_sources(self.search_sources)
         self._install_shortcuts()
         self._restore_geometry()
         self._load_all(restore_last=True)
@@ -177,6 +182,7 @@ class MainWindow(QMainWindow):
         self.dashboard.change_database_requested.connect(self.change_database)
         self.dashboard.font_scale_changed.connect(self.set_font_scale)
         self.dashboard.attachment_limits_changed.connect(self.set_attachment_limits)
+        self.dashboard.search_sources_changed.connect(self.set_search_sources)
         self.dashboard.open_conversation.connect(self._open_from_dashboard)
         self.dashboard.new_chat_requested.connect(self.new_conversation)
         self.dashboard.api_manager_requested.connect(self.open_api_manager)
@@ -437,7 +443,7 @@ class MainWindow(QMainWindow):
         self,
         text: str,
         attachments: Optional[list] = None,
-        reasoning: bool = False,
+        reasoning_level: int = 0,
         web_search: bool = False,
     ) -> None:
         if self._generating:
@@ -457,7 +463,7 @@ class MainWindow(QMainWindow):
         attachment_list = list(attachments or [])
         if not text and not attachment_list:
             return
-        self._reasoning_mode = bool(reasoning)
+        self._reasoning_level = max(0, min(3, int(reasoning_level or 0)))
         self._web_search_mode = bool(web_search)
         try:
             prepared = [prepare_attachment(attachment) for attachment in attachment_list]
@@ -506,8 +512,9 @@ class MainWindow(QMainWindow):
             provider,
             messages,
             self._cancel_event,
-            reasoning=self._reasoning_mode,
+            reasoning_level=self._reasoning_level,
             web_search=self._web_search_mode,
+            search_sources=self.search_sources,
             parent=self,
         )
         worker.delta.connect(self._on_delta)
@@ -1080,6 +1087,7 @@ class MainWindow(QMainWindow):
         server = LanShareServer(
             lambda: dict(self.db.config),
             on_change=self._lan_bridge.changed.emit,
+            search_sources_getter=lambda: list(self.search_sources),
             port=port,
             token=token,
         )
@@ -1207,6 +1215,13 @@ class MainWindow(QMainWindow):
         self.chat_page.refresh_markdown_styles()
         self._reload_conversations()
         self._set_status(f"全局字号 {int(round(new_scale * 100))}%")
+
+    def set_search_sources(self, sources: object) -> None:
+        self.search_sources = normalise_search_sources(sources)
+        self.config.set("search_sources", self.search_sources, save=False)
+        self.config.save()
+        self.dashboard.set_search_sources(self.search_sources)
+        self._set_status(f"搜索源：{' → '.join(s['label'] for s in self.search_sources)}")
 
     def set_attachment_limits(self, image_mb: int, text_mb: int, pdf_mb: int) -> None:
         apply_attachment_limits(image_mb, text_mb, pdf_mb)

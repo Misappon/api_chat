@@ -34,6 +34,7 @@ from ..attachment_utils import (
     image_attachment_from_qimage,
 )
 from ..models import Attachment, Conversation, Message, Provider
+from ..reasoning import reasoning_levels
 from ..tokens import attachment_tokens_total, estimate_tokens, format_tokens
 from .icons import icon
 from .message_bubble import MessageBubble
@@ -354,15 +355,15 @@ class ChatPage(QWidget):
         composer_footer = QHBoxLayout()
         composer_footer.setContentsMargins(2, 0, 1, 0)
         composer_footer.setSpacing(6)
-        self.reasoning_button = QToolButton()
-        self.reasoning_button.setObjectName("modeToggle")
-        self.reasoning_button.setText("思考")
-        self.reasoning_button.setCheckable(True)
-        self.reasoning_button.setToolTip(
-            "推理模式：要求模型展示/使用推理能力（需模型支持；DeepSeek 自动切换 reasoner）"
+        self.reasoning_combo = QComboBox()
+        self.reasoning_combo.setObjectName("modeCombo")
+        self.reasoning_combo.setToolTip(
+            "推理等级：关 / 低 / 中 / 高；可用等级取决于当前模型类别"
         )
-        self.reasoning_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        composer_footer.addWidget(self.reasoning_button)
+        self.reasoning_combo.addItem("思考：关", 0)
+        self.reasoning_combo.setMinimumWidth(84)
+        self.reasoning_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        composer_footer.addWidget(self.reasoning_combo)
         self.web_search_button = QToolButton()
         self.web_search_button.setObjectName("modeToggle")
         self.web_search_button.setText("联网")
@@ -446,6 +447,33 @@ class ChatPage(QWidget):
                 self.api_combo.setCurrentIndex(0)
         finally:
             self._loading = False
+            self._update_reasoning_levels()
+
+    def _selected_provider(self) -> Optional[Provider]:
+        provider_id = self.api_combo.currentData()
+        if provider_id is None:
+            return None
+        return next(
+            (provider for provider in self._providers if provider.id == int(provider_id)),
+            None,
+        )
+
+    def _update_reasoning_levels(self) -> None:
+        provider = self._selected_provider()
+        previous = int(self.reasoning_combo.currentData() or 0)
+        levels = reasoning_levels(provider)
+        self.reasoning_combo.blockSignals(True)
+        self.reasoning_combo.clear()
+        for value, label in levels:
+            self.reasoning_combo.addItem(f"思考：{label}", value)
+        index = self.reasoning_combo.findData(previous)
+        self.reasoning_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.reasoning_combo.blockSignals(False)
+        self.reasoning_combo.setEnabled(bool(levels and len(levels) > 1 and not self._generating))
+        self.reasoning_combo.setToolTip(
+            "推理等级：" + " / ".join(label for _, label in levels)
+            + "（可用等级取决于当前模型类别）"
+        )
 
     def choose_attachments(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -584,7 +612,7 @@ class ChatPage(QWidget):
     def set_generating(self, generating: bool) -> None:
         self._generating = generating
         self.attach_button.setEnabled(not generating)
-        self.reasoning_button.setEnabled(not generating)
+        self.reasoning_combo.setEnabled(not generating and self.reasoning_combo.count() > 1)
         self.web_search_button.setEnabled(not generating)
         self.send_button.setObjectName("stopButton" if generating else "sendButton")
         self.send_button.setIcon(
@@ -797,7 +825,7 @@ class ChatPage(QWidget):
         self.send_requested.emit(
             text,
             list(self._draft_attachments),
-            self.reasoning_button.isChecked(),
+            int(self.reasoning_combo.currentData() or 0),
             self.web_search_button.isChecked(),
         )
 
@@ -808,6 +836,7 @@ class ChatPage(QWidget):
         if provider_id is None:
             return
         provider = next((p for p in self._providers if p.id == int(provider_id)), None)
+        self._update_reasoning_levels()
         if provider and self.current:
             self.current.api_id = provider.id
             self.current.api_alias = provider.alias

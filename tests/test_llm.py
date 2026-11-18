@@ -336,6 +336,7 @@ class LLMTests(unittest.TestCase):
         provider = self._provider("openai", "gpt-5", suffix="")
         client = LLMClient(provider)
         client._reasoning = True
+        client._reasoning_level = 2
         body = client._openai_body(
             [{"role": "user", "content": "think"}], False, 100, 0.2
         )
@@ -351,6 +352,7 @@ class LLMTests(unittest.TestCase):
         )
         deepseek_client = LLMClient(deepseek)
         deepseek_client._reasoning = True
+        deepseek_client._reasoning_level = 3
         deepseek_body = deepseek_client._openai_body(
             [{"role": "user", "content": "think"}], False, 100, 0.2
         )
@@ -364,6 +366,7 @@ class LLMTests(unittest.TestCase):
             4096,
             0.2,
             reasoning=True,
+            reasoning_level=2,
         )
         self.assertEqual(anthropic["thinking"]["type"], "enabled")
         self.assertNotIn("temperature", anthropic)
@@ -374,6 +377,7 @@ class LLMTests(unittest.TestCase):
             100,
             0.2,
             reasoning=True,
+            reasoning_level=2,
         )
         self.assertEqual(
             gemini["generationConfig"]["thinkingConfig"]["thinkingBudget"], 4096

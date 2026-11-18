@@ -30,12 +30,14 @@ from .attachment_utils import (
 from .db import Database
 from .llm import LLMClient
 from .models import Conversation, Message
+from .agent import run_reason_search_loop
+from .reasoning import clamp_reasoning_level, reasoning_levels
 from .repository import Repository
 from .tokens import context_tokens, estimate_tokens
 from .web_search import (
     WebSearchError,
+    search_configured,
     search_context,
-    search_web,
     with_search_context,
 )
 
@@ -353,9 +355,18 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "对话不存在"}, 404)
                 return
             messages = repo.list_messages(conversation_id)
+            provider = (
+                repo.get_provider(conversation.api_id)
+                if conversation.api_id is not None
+                else None
+            )
             self._send_json(
                 {
                     "conversation": _conversation_json(conversation),
+                    "reasoning_levels": [
+                        {"value": value, "label": label}
+                        for value, label in reasoning_levels(provider)
+                    ],
                     "messages": [_message_json(message) for message in messages],
                     "database": db.name,
                 }
@@ -447,7 +458,11 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, 400)
             return
         content = str(body.get("content") or "").strip()
-        reasoning = bool(body.get("reasoning"))
+        try:
+            reasoning_level = int(body.get("reasoning_level", 0) or 0)
+        except (TypeError, ValueError):
+            reasoning_level = 0
+        reasoning_level = max(0, min(3, reasoning_level))
         web_search = bool(body.get("web_search"))
         if not content and not attachments:
             self._send_json({"error": "消息不能为空"}, 400)
@@ -468,6 +483,7 @@ class _Handler(BaseHTTPRequestHandler):
             if provider is None:
                 self._send_json({"error": "该对话没有可用 API，请先在电脑端配置。"}, 409)
                 return
+            reasoning_level = clamp_reasoning_level(provider, reasoning_level)
             if web_search and not content:
                 self._send_json({"error": "在线搜索需要一条文字问题。"}, 400)
                 return
@@ -479,9 +495,21 @@ class _Handler(BaseHTTPRequestHandler):
                 attachments=attachments,
             )
             messages = repo.api_messages(conversation_id)
-            if web_search:
+            planner_prompt = 0
+            planner_completion = 0
+            if web_search and reasoning_level > 0:
+                agent_result = run_reason_search_loop(
+                    provider,
+                    messages,
+                    reasoning_level=reasoning_level,
+                    search_sources=self.share.search_sources,
+                )
+                messages = agent_result.messages
+                planner_prompt = agent_result.planner_prompt_tokens
+                planner_completion = agent_result.planner_completion_tokens
+            elif web_search:
                 try:
-                    results = search_web(content)
+                    results = search_configured(content, self.share.search_sources)
                 except WebSearchError as exc:
                     self.share.notify_change(conversation_id)
                     self._send_json(
@@ -492,13 +520,17 @@ class _Handler(BaseHTTPRequestHandler):
                     messages, content, search_context(content, results)
                 )
             try:
-                result = LLMClient(provider).complete(messages, reasoning=reasoning)
+                result = LLMClient(provider).complete(
+                    messages, reasoning_level=reasoning_level
+                )
             except Exception as exc:
                 self.share.notify_change(conversation_id)
                 self._send_json({"error": str(exc), "user_saved": True}, 502)
                 return
-            prompt = result.prompt_tokens or context_tokens(messages, provider.system_prompt)
-            completion = result.completion_tokens or estimate_tokens(result.content)
+            prompt = (
+                result.prompt_tokens or context_tokens(messages, provider.system_prompt)
+            ) + planner_prompt
+            completion = (result.completion_tokens or estimate_tokens(result.content)) + planner_completion
             total = prompt + completion
             message_id = repo.add_message(
                 conversation_id,
@@ -547,12 +579,14 @@ class LanShareServer:
         db_config_getter: Callable[[], dict[str, Any]],
         *,
         on_change: Optional[Callable[[int], None]] = None,
+        search_sources_getter: Optional[Callable[[], object]] = None,
         host: str = "0.0.0.0",
         port: int = 8765,
         token: str | None = None,
     ) -> None:
         self.db_config_getter = db_config_getter
         self.on_change = on_change
+        self.search_sources_getter = search_sources_getter
         self.host = host
         self.port = port
         self.token = token or new_access_token()
@@ -572,6 +606,15 @@ class LanShareServer:
     @property
     def running(self) -> bool:
         return self._httpd is not None
+
+    @property
+    def search_sources(self) -> object:
+        if self.search_sources_getter is None:
+            return None
+        try:
+            return self.search_sources_getter()
+        except Exception:
+            return None
 
     @property
     def lan_ip(self) -> str:
@@ -770,7 +813,7 @@ background:#261720;border:1px solid #5a293b;color:#ffadb7;font-size:11px;display
     <div class="error" id="error"></div>
     <div class="draft" id="draftAttachments"></div>
     <div class="composer-inner">
-     <button class="mode" id="reasonBtn" type="button" title="推理模式：需要模型支持；DeepSeek 自动使用 reasoner">思考</button>
+     <select class="mode" id="reasonLevel" title="推理等级：可用等级取决于当前模型类别"></select>
      <button class="mode" id="searchBtn" type="button" title="在线搜索：仅在手动开启时把当前问题发送到外部搜索服务">联网</button>
      <button class="attach" id="attachBtn" title="添加图片或文本附件">📎</button>
      <input type="file" id="fileInput" multiple hidden accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,application/pdf,.pdf,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.java,.kt,.c,.h,.cpp,.cc,.hpp,.cs,.go,.rs,.rb,.php,.swift,.sql,.sh,.bash,.bat,.cmd,.ps1,.vue,.svelte,.lua,.r,.m,.mm">
@@ -790,7 +833,7 @@ let currentId = null;
 let busy = false;
 let draftAttachments = [];
 let limits = {image_mb: 10, text_mb: 2, pdf_mb: 20, max_attachments: 6};
-let reasoningMode = false;
+let reasoningLevel = 0;
 let webSearchMode = false;
 function esc(v){return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(path, options={}){
@@ -804,7 +847,7 @@ async function api(path, options={}){
 }
 function showError(text){ const e=$('error'); e.textContent=text; e.style.display=text?'block':'none'; }
 function setBusy(v){ busy=v; $('sendBtn').disabled=v; $('attachBtn').disabled=v;
-  $('reasonBtn').disabled=v; $('searchBtn').disabled=v;
+  $('reasonLevel').disabled=v; $('searchBtn').disabled=v;
   $('sendBtn').textContent=v?'…':'➤'; }
 function isImageFile(file){
   const ext=(file.name.split('.').pop()||'').toLowerCase();
@@ -871,11 +914,23 @@ function renderConversations(){
     </div>`).join('');
   box.querySelectorAll('.conv').forEach(el=>el.onclick=()=>{ openConversation(Number(el.dataset.id)); closeSidebar(); });
 }
+function renderReasoningLevels(levels){
+  const sel=$('reasonLevel');
+  const previous=Number(sel.value||reasoningLevel||0);
+  const items=Array.isArray(levels)&&levels.length?levels:[{value:0,label:'关'}];
+  sel.innerHTML=items.map(item=>
+    `<option value="${Number(item.value)||0}">思考：${esc(item.label||'关')}</option>`
+  ).join('');
+  const values=Array.from(sel.options).map(o=>Number(o.value));
+  sel.value=String(values.includes(previous)?previous:0);
+  reasoningLevel=Number(sel.value||0);
+}
 function renderMessages(data){
   const box=$('messages');
   const c=data.conversation;
   $('chatTitle').textContent=c.title || 'API Chat';
   $('ctxPill').textContent=(c.api_alias||'—')+' · 剩余 '+c.remaining_percent+'%';
+  renderReasoningLevels(data.reasoning_levels);
   if(!data.messages.length){ box.innerHTML='<div class="empty">这段对话还没有消息，发一条吧</div>'; return; }
   box.innerHTML=data.messages.map(m=>{
     const user=m.role==='user';
@@ -916,7 +971,7 @@ async function send(){
       method:'POST',
       body: JSON.stringify({
         content:text,
-        reasoning:reasoningMode,
+        reasoning_level:Number(reasoningLevel||0),
         web_search:webSearchMode,
         attachments:draftAttachments.map(a=>({filename:a.filename,mime_type:a.mime_type,data:a.data}))
       })
@@ -948,15 +1003,16 @@ $('refreshBtn').onclick=()=>loadConversations(currentId);
 $('newBtn').onclick=newConversation;
 $('sendBtn').onclick=send;
 $('attachBtn').onclick=()=>$('fileInput').click();
-$('reasonBtn').onclick=()=>{reasoningMode=!reasoningMode; $('reasonBtn').classList.toggle('on',reasoningMode);};
+$('reasonLevel').onchange=()=>{reasoningLevel=Number($('reasonLevel').value||0);};
 $('searchBtn').onclick=()=>{
   webSearchMode=!webSearchMode;
   $('searchBtn').classList.toggle('on',webSearchMode);
-  if(webSearchMode) showError('在线搜索会将当前问题发送到外部搜索服务 Bing；结果仅作参考。');
+  if(webSearchMode) showError('在线搜索会将当前问题发送到配置的外部搜索源；结果仅作参考。');
 };
 $('fileInput').onchange=async(e)=>{await addFiles(e.target.files); e.target.value='';};
 $('input').addEventListener('input',()=>{const el=$('input'); el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px';});
 $('input').addEventListener('keydown',(e)=>{if(e.key==='Enter'&&!e.shiftKey&&window.innerWidth>760){e.preventDefault();send();}});
 renderDraft();
+renderReasoningLevels([{value:0,label:'关'}]);
 loadLimits().finally(()=>loadConversations().catch(e=>showError(e.message)));
 </script></body></html>"""

@@ -6,13 +6,15 @@ import threading
 
 from PySide6.QtCore import QThread, Signal
 
+from .agent import run_reason_search_loop
 from .importer import import_from_html_file, import_from_url, parse_transcript
 from .llm import LLMClient, LLMError, title_messages
 from .models import CompletionResult, Provider
+from .tokens import context_tokens, estimate_tokens
 from .web_search import (
     WebSearchError,
+    search_configured,
     search_context,
-    search_web,
     with_search_context,
 )
 
@@ -31,16 +33,18 @@ class ChatStreamWorker(QThread):
         messages: list[dict],
         cancel_event: threading.Event,
         *,
-        reasoning: bool = False,
+        reasoning_level: int = 0,
         web_search: bool = False,
+        search_sources: object = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.provider = provider
         self.messages = messages
         self.cancel_event = cancel_event
-        self.reasoning = reasoning
+        self.reasoning_level = max(0, min(3, int(reasoning_level or 0)))
         self.web_search = web_search
+        self.search_sources = search_sources
 
     def _search_query(self) -> str:
         for message in reversed(self.messages):
@@ -51,21 +55,38 @@ class ChatStreamWorker(QThread):
     def run(self) -> None:
         try:
             messages = self.messages
+            planner_prompt = 0
+            planner_completion = 0
             if self.web_search:
                 query = self._search_query()
                 if not query:
                     self.failed.emit("在线搜索需要一条文字问题。")
                     return
-                self.status.emit("正在搜索网页…")
-                try:
-                    results = search_web(query)
-                except WebSearchError as exc:
-                    self.failed.emit(f"在线搜索失败：{exc}")
-                    return
-                messages = with_search_context(
-                    messages, query, search_context(query, results)
-                )
-                self.status.emit(f"已获取 {len(results)} 条搜索结果，正在请求模型…")
+                if self.reasoning_level > 0:
+                    agent_result = run_reason_search_loop(
+                        self.provider,
+                        messages,
+                        reasoning_level=self.reasoning_level,
+                        search_sources=self.search_sources,
+                        on_status=self.status.emit,
+                        cancel_event=self.cancel_event,
+                    )
+                    messages = agent_result.messages
+                    planner_prompt = agent_result.planner_prompt_tokens
+                    planner_completion = agent_result.planner_completion_tokens
+                else:
+                    self.status.emit("正在搜索网页…")
+                    try:
+                        results = search_configured(query, self.search_sources)
+                    except WebSearchError as exc:
+                        self.failed.emit(f"在线搜索失败：{exc}")
+                        return
+                    messages = with_search_context(
+                        messages, query, search_context(query, results)
+                    )
+                    self.status.emit(
+                        f"已获取 {len(results)} 条搜索结果，正在请求模型…"
+                    )
             if self.cancel_event.is_set():
                 self.cancelled.emit(
                     CompletionResult(content="", finish_reason="cancelled")
@@ -76,9 +97,18 @@ class ChatStreamWorker(QThread):
                 messages,
                 on_delta=self.delta.emit,
                 cancel_event=self.cancel_event,
-                reasoning=self.reasoning,
+                reasoning_level=self.reasoning_level,
                 on_reasoning=self.reasoning_delta.emit,
             )
+            if planner_prompt or planner_completion:
+                result.prompt_tokens = (
+                    result.prompt_tokens
+                    or context_tokens(messages, self.provider.system_prompt)
+                ) + planner_prompt
+                result.completion_tokens = (
+                    result.completion_tokens or estimate_tokens(result.content)
+                ) + planner_completion
+                result.total_tokens = result.prompt_tokens + result.completion_tokens
             if result.finish_reason == "cancelled":
                 self.cancelled.emit(result)
             else:

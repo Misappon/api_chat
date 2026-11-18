@@ -131,7 +131,9 @@ class LanServerTests(unittest.TestCase):
                 self.base + f"/api/conversations/{self.conversation_id}?token=testtoken"
             )
             self.assertEqual(response.status_code, 200)
-            messages = response.json()["messages"]
+            payload = response.json()
+            self.assertEqual(len(payload["reasoning_levels"]), 4)
+            messages = payload["messages"]
             self.assertEqual(len(messages), 2)
             self.assertIn("<strong>hi</strong>", messages[1]["html"])
             self.assertNotIn("<script>", messages[1]["html"])

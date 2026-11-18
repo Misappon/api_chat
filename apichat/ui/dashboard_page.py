@@ -8,11 +8,16 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -26,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from ..models import ApiUsageRow, DashboardRow, DashboardTotals
 from ..tokens import format_tokens
+from ..web_search import normalise_search_sources
 from .icons import icon
 from .theme import (
     ACCENT,
@@ -138,6 +144,7 @@ class DashboardPage(QWidget):
     api_manager_requested = Signal()
     font_scale_changed = Signal(float)
     attachment_limits_changed = Signal(int, int, int)
+    search_sources_changed = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -258,6 +265,61 @@ class DashboardPage(QWidget):
         self.image_limit_spin.valueChanged.connect(self._emit_attachment_limits)
         self.text_limit_spin.valueChanged.connect(self._emit_attachment_limits)
         self.pdf_limit_spin.valueChanged.connect(self._emit_attachment_limits)
+
+        search_box = QFrame()
+        search_box.setObjectName("searchSourceBox")
+        search_layout = QVBoxLayout(search_box)
+        search_layout.setContentsMargins(14, 8, 14, 9)
+        search_layout.setSpacing(5)
+        search_title = QLabel("搜索源优先级")
+        search_title.setObjectName("limitTitle")
+        search_hint = QLabel(
+            "开启联网后按从上到下的顺序搜索并汇总；可增删和调整顺序"
+        )
+        search_hint.setObjectName("limitHint")
+        search_layout.addWidget(search_title)
+        search_layout.addWidget(search_hint)
+        search_body = QHBoxLayout()
+        search_body.setSpacing(8)
+        self.search_list = QListWidget()
+        self.search_list.setObjectName("searchSourceList")
+        self.search_list.setFixedHeight(78)
+        self.search_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection
+        )
+        search_body.addWidget(self.search_list, 1)
+        search_controls = QVBoxLayout()
+        search_controls.setSpacing(4)
+        source_row = QHBoxLayout()
+        source_row.setSpacing(4)
+        self.search_type_combo = QComboBox()
+        self.search_type_combo.setObjectName("searchSourceType")
+        self.search_type_combo.addItem("Bing", "bing")
+        self.search_type_combo.addItem("DuckDuckGo", "duckduckgo")
+        self.search_type_combo.addItem("SearXNG", "searxng")
+        source_row.addWidget(self.search_type_combo)
+        add_source = QPushButton("添加")
+        add_source.setObjectName("smallButton")
+        add_source.clicked.connect(self._add_search_source)
+        source_row.addWidget(add_source)
+        search_controls.addLayout(source_row)
+        order_row = QHBoxLayout()
+        order_row.setSpacing(4)
+        up = QPushButton("↑ 上移")
+        up.setObjectName("smallButton")
+        up.clicked.connect(lambda: self._move_search_source(-1))
+        down = QPushButton("↓ 下移")
+        down.setObjectName("smallButton")
+        down.clicked.connect(lambda: self._move_search_source(1))
+        remove = QPushButton("删除")
+        remove.setObjectName("smallButton")
+        remove.clicked.connect(self._remove_search_source)
+        for button in (up, down, remove):
+            order_row.addWidget(button)
+        search_controls.addLayout(order_row)
+        search_body.addLayout(search_controls)
+        search_layout.addLayout(search_body)
+        layout.addWidget(search_box)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -481,6 +543,82 @@ class DashboardPage(QWidget):
             self.text_limit_spin.value(),
             self.pdf_limit_spin.value(),
         )
+
+    def _current_search_sources(self) -> list[dict[str, str]]:
+        result = []
+        for index in range(self.search_list.count()):
+            data = self.search_list.item(index).data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, dict):
+                result.append(dict(data))
+        return result
+
+    def _render_search_sources(self, sources: list[dict[str, str]], select_row: int = -1) -> None:
+        self.search_list.clear()
+        for index, source in enumerate(sources):
+            item = QListWidgetItem(f"{index + 1}. {source.get('label') or source.get('type')}")
+            item.setData(Qt.ItemDataRole.UserRole, dict(source))
+            item.setToolTip(source.get("endpoint") or "")
+            self.search_list.addItem(item)
+        if 0 <= select_row < self.search_list.count():
+            self.search_list.setCurrentRow(select_row)
+
+    def set_search_sources(self, sources: object) -> None:
+        self._render_search_sources(normalise_search_sources(sources))
+
+    def _commit_search_sources(self, sources: list[dict[str, str]]) -> None:
+        sources = normalise_search_sources(sources)
+        self._render_search_sources(sources)
+        self.search_sources_changed.emit(sources)
+
+    def _add_search_source(self) -> None:
+        kind = str(self.search_type_combo.currentData() or "bing")
+        endpoint = ""
+        if kind == "searxng":
+            endpoint, ok = QInputDialog.getText(
+                self,
+                "添加 SearXNG",
+                "公网 HTTPS SearXNG 地址（需支持 format=json）：",
+            )
+            if not ok or not endpoint.strip():
+                return
+            endpoint = endpoint.strip()
+        sources = self._current_search_sources()
+        before = len(normalise_search_sources(sources))
+        sources.append(
+            {
+                "id": "",
+                "type": kind,
+                "label": {"bing": "Bing", "duckduckgo": "DuckDuckGo", "searxng": "SearXNG"}.get(
+                    kind, kind
+                ),
+                "endpoint": endpoint,
+            }
+        )
+        normalized = normalise_search_sources(sources)
+        if len(normalized) <= before:
+            QMessageBox.information(
+                self, "搜索源未添加", "该搜索源已存在，或 SearXNG 地址不是公网 HTTPS 地址。"
+            )
+            return
+        self._commit_search_sources(normalized)
+
+    def _move_search_source(self, delta: int) -> None:
+        row = self.search_list.currentRow()
+        target = row + delta
+        sources = self._current_search_sources()
+        if row < 0 or target < 0 or target >= len(sources):
+            return
+        sources[row], sources[target] = sources[target], sources[row]
+        self._commit_search_sources(sources)
+        self.search_list.setCurrentRow(target)
+
+    def _remove_search_source(self) -> None:
+        row = self.search_list.currentRow()
+        sources = self._current_search_sources()
+        if row < 0 or len(sources) <= 1:
+            return
+        sources.pop(row)
+        self._commit_search_sources(sources)
 
     def set_attachment_limits(self, image_mb: int, text_mb: int, pdf_mb: int) -> None:
         self.image_limit_spin.blockSignals(True)
