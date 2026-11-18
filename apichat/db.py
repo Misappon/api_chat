@@ -10,7 +10,7 @@ from pymysql.cursors import DictCursor
 
 DB_NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_STATEMENTS = [
     """
@@ -53,6 +53,7 @@ SCHEMA_STATEMENTS = [
         conversation_id  BIGINT NOT NULL,
         role             VARCHAR(16) NOT NULL,
         content          LONGTEXT NOT NULL,
+        reasoning_content LONGTEXT NULL,
         token_count      INT NOT NULL DEFAULT 0,
         model            VARCHAR(160) NOT NULL DEFAULT '',
         created_at       DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -213,6 +214,11 @@ class Database:
             with self.connection.cursor() as cursor:
                 for statement in SCHEMA_STATEMENTS:
                     cursor.execute(statement)
+                cursor.execute("SHOW COLUMNS FROM messages LIKE 'reasoning_content'")
+                if cursor.fetchone() is None:
+                    cursor.execute(
+                        "ALTER TABLE messages ADD COLUMN reasoning_content LONGTEXT NULL AFTER content"
+                    )
                 cursor.execute(
                     "INSERT INTO app_meta (meta_key, meta_value) VALUES ('schema_version', %s) "
                     "ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)",

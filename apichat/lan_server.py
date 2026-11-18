@@ -32,6 +32,12 @@ from .llm import LLMClient
 from .models import Conversation, Message
 from .repository import Repository
 from .tokens import context_tokens, estimate_tokens
+from .web_search import (
+    WebSearchError,
+    search_context,
+    search_web,
+    with_search_context,
+)
 
 MAX_MESSAGE_CHARS = 20_000
 
@@ -149,6 +155,8 @@ def _message_json(message: Message) -> dict[str, Any]:
         "role": message.role,
         "content": message.content,
         "html": _markdown_html(message.content),
+        "reasoning": message.reasoning_content,
+        "reasoning_html": _markdown_html(message.reasoning_content),
         "created_at": _iso(message.created_at),
         "token_count": message.token_count,
         "attachments": [
@@ -439,6 +447,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, 400)
             return
         content = str(body.get("content") or "").strip()
+        reasoning = bool(body.get("reasoning"))
+        web_search = bool(body.get("web_search"))
         if not content and not attachments:
             self._send_json({"error": "消息不能为空"}, 400)
             return
@@ -458,6 +468,9 @@ class _Handler(BaseHTTPRequestHandler):
             if provider is None:
                 self._send_json({"error": "该对话没有可用 API，请先在电脑端配置。"}, 409)
                 return
+            if web_search and not content:
+                self._send_json({"error": "在线搜索需要一条文字问题。"}, 400)
+                return
             repo.add_message(
                 conversation_id,
                 "user",
@@ -466,8 +479,20 @@ class _Handler(BaseHTTPRequestHandler):
                 attachments=attachments,
             )
             messages = repo.api_messages(conversation_id)
+            if web_search:
+                try:
+                    results = search_web(content)
+                except WebSearchError as exc:
+                    self.share.notify_change(conversation_id)
+                    self._send_json(
+                        {"error": f"在线搜索失败：{exc}", "user_saved": True}, 502
+                    )
+                    return
+                messages = with_search_context(
+                    messages, content, search_context(content, results)
+                )
             try:
-                result = LLMClient(provider).complete(messages)
+                result = LLMClient(provider).complete(messages, reasoning=reasoning)
             except Exception as exc:
                 self.share.notify_change(conversation_id)
                 self._send_json({"error": str(exc), "user_saved": True}, 502)
@@ -480,6 +505,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "assistant",
                 result.content,
                 model=result.model or provider.model,
+                reasoning=result.reasoning or "",
                 token_count=completion or None,
                 usage={
                     "api_id": provider.id,
@@ -700,6 +726,14 @@ background:var(--surface);border:1px solid var(--border);border-radius:14px;padd
 .attach{width:38px;height:38px;border:0;border-radius:50%;background:transparent;color:var(--muted);
 font-size:20px;display:grid;place-items:center;flex:0 0 38px}
 .attach:disabled{opacity:.4}
+.mode{border:1px solid var(--border);background:var(--surface2,#171f2d);color:var(--muted);
+border-radius:8px;padding:6px 7px;font-size:11px;flex:0 0 auto}
+.mode.on{background:#202c4c;border-color:var(--accent);color:var(--text)}
+.mode:disabled{opacity:.45}
+.bubble details.reasoning{margin:0 0 8px;padding:6px 8px;border-radius:7px;
+background:#101722;border:1px solid #26324a;color:#a9b6cc;font-size:12px}
+.bubble details.reasoning summary{cursor:pointer;color:var(--muted);font-weight:600;font-size:11px}
+.bubble details.reasoning[open] summary{margin-bottom:5px}
 textarea{flex:1;resize:none;border:0;background:transparent;color:var(--text);
 font:inherit;font-size:14px;line-height:1.5;max-height:120px;min-height:24px;outline:none;padding:5px 0}
 .attach-hint{max-width:840px;margin:5px auto 0;color:var(--faint);font-size:9px;text-align:right}
@@ -736,6 +770,8 @@ background:#261720;border:1px solid #5a293b;color:#ffadb7;font-size:11px;display
     <div class="error" id="error"></div>
     <div class="draft" id="draftAttachments"></div>
     <div class="composer-inner">
+     <button class="mode" id="reasonBtn" type="button" title="推理模式：需要模型支持；DeepSeek 自动使用 reasoner">思考</button>
+     <button class="mode" id="searchBtn" type="button" title="在线搜索：仅在手动开启时把当前问题发送到外部搜索服务">联网</button>
      <button class="attach" id="attachBtn" title="添加图片或文本附件">📎</button>
      <input type="file" id="fileInput" multiple hidden accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,application/pdf,.pdf,.txt,.md,.markdown,.csv,.tsv,.json,.jsonl,.xml,.yaml,.yml,.toml,.ini,.cfg,.conf,.log,.html,.htm,.css,.js,.jsx,.ts,.tsx,.py,.java,.kt,.c,.h,.cpp,.cc,.hpp,.cs,.go,.rs,.rb,.php,.swift,.sql,.sh,.bash,.bat,.cmd,.ps1,.vue,.svelte,.lua,.r,.m,.mm">
      <textarea id="input" rows="1" placeholder="输入消息…"></textarea>
@@ -754,6 +790,8 @@ let currentId = null;
 let busy = false;
 let draftAttachments = [];
 let limits = {image_mb: 10, text_mb: 2, pdf_mb: 20, max_attachments: 6};
+let reasoningMode = false;
+let webSearchMode = false;
 function esc(v){return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function api(path, options={}){
   const sep = path.includes('?') ? '&' : '?';
@@ -765,7 +803,9 @@ async function api(path, options={}){
   return data;
 }
 function showError(text){ const e=$('error'); e.textContent=text; e.style.display=text?'block':'none'; }
-function setBusy(v){ busy=v; $('sendBtn').disabled=v; $('attachBtn').disabled=v; $('sendBtn').textContent=v?'…':'➤'; }
+function setBusy(v){ busy=v; $('sendBtn').disabled=v; $('attachBtn').disabled=v;
+  $('reasonBtn').disabled=v; $('searchBtn').disabled=v;
+  $('sendBtn').textContent=v?'…':'➤'; }
 function isImageFile(file){
   const ext=(file.name.split('.').pop()||'').toLowerCase();
   return ['image/png','image/jpeg','image/webp','image/gif','image/bmp'].includes(file.type)
@@ -844,9 +884,11 @@ function renderMessages(data){
     const files=(m.attachments||[]).filter(a=>a.kind!=='image').map(a=>
       `<a class="file" href="/api/attachments/${a.id}?token=${encodeURIComponent(TOKEN)}" target="_blank">📎 ${esc(a.filename)}</a>`).join('');
     const time=(m.created_at||'').replace('T',' ').slice(0,16);
+    const reasoning=m.reasoning_html
+      ? `<details class="reasoning"><summary>思考过程</summary>${m.reasoning_html}</details>` : '';
     return `<div class="msg ${user?'user':'assistant'}">
       <div class="avatar">${user?'你':'AI'}</div>
-      <div class="bubble">${m.html || '<div class="plain">'+esc(m.content)+'</div>'}${imgs}${files}
+      <div class="bubble">${reasoning}${m.html || '<div class="plain">'+esc(m.content)+'</div>'}${imgs}${files}
         <div class="meta">${esc(time)}</div></div></div>`;
   }).join('');
   scrollBottom();
@@ -874,6 +916,8 @@ async function send(){
       method:'POST',
       body: JSON.stringify({
         content:text,
+        reasoning:reasoningMode,
+        web_search:webSearchMode,
         attachments:draftAttachments.map(a=>({filename:a.filename,mime_type:a.mime_type,data:a.data}))
       })
     });
@@ -904,6 +948,12 @@ $('refreshBtn').onclick=()=>loadConversations(currentId);
 $('newBtn').onclick=newConversation;
 $('sendBtn').onclick=send;
 $('attachBtn').onclick=()=>$('fileInput').click();
+$('reasonBtn').onclick=()=>{reasoningMode=!reasoningMode; $('reasonBtn').classList.toggle('on',reasoningMode);};
+$('searchBtn').onclick=()=>{
+  webSearchMode=!webSearchMode;
+  $('searchBtn').classList.toggle('on',webSearchMode);
+  if(webSearchMode) showError('在线搜索会将当前问题发送到外部搜索服务 Bing；结果仅作参考。');
+};
 $('fileInput').onchange=async(e)=>{await addFiles(e.target.files); e.target.value='';};
 $('input').addEventListener('input',()=>{const el=$('input'); el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px';});
 $('input').addEventListener('keydown',(e)=>{if(e.key==='Enter'&&!e.shiftKey&&window.innerWidth>760){e.preventDefault();send();}});

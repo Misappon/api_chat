@@ -8,11 +8,19 @@ from PySide6.QtCore import QThread, Signal
 
 from .importer import import_from_html_file, import_from_url, parse_transcript
 from .llm import LLMClient, LLMError, title_messages
-from .models import Provider
+from .models import CompletionResult, Provider
+from .web_search import (
+    WebSearchError,
+    search_context,
+    search_web,
+    with_search_context,
+)
 
 
 class ChatStreamWorker(QThread):
     delta = Signal(str)
+    reasoning_delta = Signal(str)
+    status = Signal(str)
     succeeded = Signal(object)
     cancelled = Signal(object)
     failed = Signal(str)
@@ -22,20 +30,54 @@ class ChatStreamWorker(QThread):
         provider: Provider,
         messages: list[dict],
         cancel_event: threading.Event,
+        *,
+        reasoning: bool = False,
+        web_search: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.provider = provider
         self.messages = messages
         self.cancel_event = cancel_event
+        self.reasoning = reasoning
+        self.web_search = web_search
+
+    def _search_query(self) -> str:
+        for message in reversed(self.messages):
+            if message.get("role") == "user":
+                return str(message.get("content") or "").strip()
+        return ""
 
     def run(self) -> None:
         try:
+            messages = self.messages
+            if self.web_search:
+                query = self._search_query()
+                if not query:
+                    self.failed.emit("在线搜索需要一条文字问题。")
+                    return
+                self.status.emit("正在搜索网页…")
+                try:
+                    results = search_web(query)
+                except WebSearchError as exc:
+                    self.failed.emit(f"在线搜索失败：{exc}")
+                    return
+                messages = with_search_context(
+                    messages, query, search_context(query, results)
+                )
+                self.status.emit(f"已获取 {len(results)} 条搜索结果，正在请求模型…")
+            if self.cancel_event.is_set():
+                self.cancelled.emit(
+                    CompletionResult(content="", finish_reason="cancelled")
+                )
+                return
             client = LLMClient(self.provider)
             result = client.stream_chat(
-                self.messages,
+                messages,
                 on_delta=self.delta.emit,
                 cancel_event=self.cancel_event,
+                reasoning=self.reasoning,
+                on_reasoning=self.reasoning_delta.emit,
             )
             if result.finish_reason == "cancelled":
                 self.cancelled.emit(result)

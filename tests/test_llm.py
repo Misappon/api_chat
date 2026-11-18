@@ -62,8 +62,17 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
         if path.endswith("/chat/completions"):
+            reasoning = body.get("model") == "mock-reasoning" or body.get("reasoning_effort")
             if body.get("stream"):
                 self._start_sse()
+                if reasoning:
+                    self._sse(
+                        {
+                            "id": "mock",
+                            "model": "mock-reasoning",
+                            "choices": [{"delta": {"reasoning_content": "先思考。"}}],
+                        }
+                    )
                 self._sse(
                     {
                         "id": "mock",
@@ -97,7 +106,11 @@ class _Handler(BaseHTTPRequestHandler):
                     "model": "mock-openai",
                     "choices": [
                         {
-                            "message": {"role": "assistant", "content": "非流式回复"},
+                            "message": {
+                                "role": "assistant",
+                                "content": "非流式回复",
+                                **({"reasoning_content": "先思考。"} if reasoning else {}),
+                            },
                             "finish_reason": "stop",
                         }
                     ],
@@ -298,6 +311,73 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(result.prompt_tokens, 7)
         self.assertEqual(result.completion_tokens, 5)
         self.assertEqual(result.total_tokens, 12)
+
+    def test_reasoning_stream_and_complete(self) -> None:
+        provider = self._provider("openai", "mock-reasoning", suffix="")
+        client = LLMClient(provider)
+        reasoning_parts: list[str] = []
+        result = client.stream_chat(
+            [{"role": "user", "content": "think"}],
+            on_delta=lambda _text: None,
+            reasoning=True,
+            on_reasoning=reasoning_parts.append,
+        )
+        self.assertEqual(result.reasoning, "先思考。")
+        self.assertEqual("".join(reasoning_parts), "先思考。")
+        self.assertIn("OpenAI", result.content)
+
+        complete = client.complete(
+            [{"role": "user", "content": "think"}], reasoning=True
+        )
+        self.assertEqual(complete.reasoning, "先思考。")
+        self.assertEqual(complete.content, "非流式回复")
+
+    def test_reasoning_payloads(self) -> None:
+        provider = self._provider("openai", "gpt-5", suffix="")
+        client = LLMClient(provider)
+        client._reasoning = True
+        body = client._openai_body(
+            [{"role": "user", "content": "think"}], False, 100, 0.2
+        )
+        self.assertEqual(body["reasoning_effort"], "medium")
+        self.assertNotIn("temperature", body)
+
+        deepseek = Provider(
+            id=1,
+            alias="DeepSeek",
+            provider="openai",
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-chat",
+        )
+        deepseek_client = LLMClient(deepseek)
+        deepseek_client._reasoning = True
+        deepseek_body = deepseek_client._openai_body(
+            [{"role": "user", "content": "think"}], False, 100, 0.2
+        )
+        self.assertEqual(deepseek_body["model"], "deepseek-reasoner")
+        self.assertNotIn("reasoning_effort", deepseek_body)
+
+        anthropic = _anthropic_payload(
+            provider,
+            [{"role": "user", "content": "think"}],
+            False,
+            4096,
+            0.2,
+            reasoning=True,
+        )
+        self.assertEqual(anthropic["thinking"]["type"], "enabled")
+        self.assertNotIn("temperature", anthropic)
+
+        gemini = _gemini_payload(
+            provider,
+            [{"role": "user", "content": "think"}],
+            100,
+            0.2,
+            reasoning=True,
+        )
+        self.assertEqual(
+            gemini["generationConfig"]["thinkingConfig"]["thinkingBudget"], 4096
+        )
 
     def test_http_error_is_readable(self) -> None:
         provider = self._provider("openai", "mock-openai", suffix="/unauthorized")

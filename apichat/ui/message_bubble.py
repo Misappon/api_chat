@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -36,6 +36,7 @@ class MessageBubble(QWidget):
         *,
         role: str,
         content: str,
+        reasoning: str = "",
         message_id: int = 0,
         model: str = "",
         created_at: Optional[datetime] = None,
@@ -48,6 +49,7 @@ class MessageBubble(QWidget):
         super().__init__(parent)
         self.role = role
         self.content = content or ""
+        self.reasoning = reasoning or ""
         self.message_id = message_id
         self.model = model
         self.created_at = created_at or datetime.now()
@@ -56,6 +58,11 @@ class MessageBubble(QWidget):
         self.token_count = token_count
         self.attachments = attachments or []
         self.streaming = message_id == 0
+        self._stream_timer = QTimer(self)
+        self._stream_timer.setSingleShot(True)
+        self._stream_timer.setInterval(70)
+        self._stream_timer.timeout.connect(self._render_stream)
+        self._reasoning_expanded = False
         self._build()
 
     def _build(self) -> None:
@@ -110,6 +117,24 @@ class MessageBubble(QWidget):
 
         if self.attachments:
             bubble_layout.addWidget(self._build_attachments())
+
+        self.reasoning_box = QFrame()
+        self.reasoning_box.setObjectName("reasoningBox")
+        reasoning_layout = QVBoxLayout(self.reasoning_box)
+        reasoning_layout.setContentsMargins(8, 5, 8, 6)
+        reasoning_layout.setSpacing(2)
+        self.reasoning_toggle = QPushButton("▸ 思考过程")
+        self.reasoning_toggle.setObjectName("reasoningToggle")
+        self.reasoning_toggle.setCheckable(True)
+        self.reasoning_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reasoning_toggle.toggled.connect(self._toggle_reasoning)
+        reasoning_layout.addWidget(self.reasoning_toggle)
+        self.reasoning_view = MarkdownView()
+        self.reasoning_view.set_markdown(self.reasoning, streaming=self.streaming)
+        self.reasoning_view.hide()
+        reasoning_layout.addWidget(self.reasoning_view)
+        self.reasoning_box.setVisible(bool(self.reasoning.strip()))
+        bubble_layout.addWidget(self.reasoning_box)
 
         self.view = MarkdownView()
         self.view.set_markdown(self.content, streaming=self.streaming)
@@ -193,6 +218,29 @@ class MessageBubble(QWidget):
             layout.addWidget(button)
         return container
 
+    def _toggle_reasoning(self, checked: bool) -> None:
+        self._reasoning_expanded = checked
+        self.reasoning_toggle.setText(("▾ " if checked else "▸ ") + "思考过程")
+        self.reasoning_view.setVisible(checked and bool(self.reasoning.strip()))
+
+    def _set_reasoning(self, reasoning: str, *, streaming: bool) -> None:
+        had_reasoning = bool(self.reasoning.strip())
+        self.reasoning = reasoning or ""
+        has_reasoning = bool(self.reasoning.strip())
+        self.reasoning_box.setVisible(has_reasoning)
+        if has_reasoning:
+            if not streaming:
+                self.reasoning_view.set_markdown(self.reasoning, streaming=False)
+            if streaming and not had_reasoning:
+                self.reasoning_toggle.setChecked(True)
+
+    def _render_stream(self) -> None:
+        if not self.streaming:
+            return
+        self.view.set_markdown(self.content, streaming=True)
+        if self.reasoning.strip():
+            self.reasoning_view.set_markdown(self.reasoning, streaming=True)
+
     def _usage_text(self) -> str:
         if self.role == "user":
             tokens = self.token_count or (
@@ -208,16 +256,24 @@ class MessageBubble(QWidget):
             return f"约 {format_tokens(estimate_tokens(self.content))} tokens"
         return ""
 
-    def update_stream(self, text: str, *, status: str = "生成中") -> None:
+    def update_stream(
+        self, text: str, *, reasoning: Optional[str] = None, status: str = "生成中"
+    ) -> None:
         self.content = text
-        self.view.set_markdown(text, streaming=True)
+        if reasoning is not None:
+            self._set_reasoning(reasoning, streaming=True)
+        if not self._stream_timer.isActive():
+            self._stream_timer.start()
         approx = estimate_tokens(text)
         self.stream_label.setText(f"{status} · 已接收约 {format_tokens(approx)} tokens")
         self.stream_label.show()
 
-    def finish(self, *, content: str, message_id: int, model: str = "", prompt_tokens: int = 0,
-               completion_tokens: int = 0, created_at: Optional[datetime] = None) -> None:
+    def finish(self, *, content: str, reasoning: str = "", message_id: int, model: str = "",
+               prompt_tokens: int = 0, completion_tokens: int = 0,
+               created_at: Optional[datetime] = None) -> None:
+        self._stream_timer.stop()
         self.content = content or ""
+        self._set_reasoning(reasoning, streaming=False)
         self.message_id = message_id
         self.model = model or self.model
         self.prompt_tokens = prompt_tokens
@@ -250,6 +306,7 @@ class MessageBubble(QWidget):
         return cls(
             role=message.role,
             content=message.content,
+            reasoning=message.reasoning_content,
             message_id=message.id,
             model=message.model,
             created_at=message.created_at,

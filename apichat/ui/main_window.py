@@ -78,6 +78,9 @@ class MainWindow(QMainWindow):
         self._stream_provider: Optional[Provider] = None
         self._stream_messages: list[dict] = []
         self._stream_buffer = ""
+        self._stream_reasoning_buffer = ""
+        self._reasoning_mode = False
+        self._web_search_mode = False
         self._title_workers: dict[int, TitleWorker] = {}
         self._epoch = 0
         self.lan_server: Optional[LanShareServer] = None
@@ -430,7 +433,13 @@ class MainWindow(QMainWindow):
                 return provider
         return self._default_provider()
 
-    def send_message(self, text: str, attachments: Optional[list] = None) -> None:
+    def send_message(
+        self,
+        text: str,
+        attachments: Optional[list] = None,
+        reasoning: bool = False,
+        web_search: bool = False,
+    ) -> None:
         if self._generating:
             return
         if not self.current_conversation:
@@ -448,6 +457,8 @@ class MainWindow(QMainWindow):
         attachment_list = list(attachments or [])
         if not text and not attachment_list:
             return
+        self._reasoning_mode = bool(reasoning)
+        self._web_search_mode = bool(web_search)
         try:
             prepared = [prepare_attachment(attachment) for attachment in attachment_list]
             self.repo.add_message(
@@ -489,9 +500,19 @@ class MainWindow(QMainWindow):
         self._stream_provider = provider
         self._stream_messages = messages
         self._stream_buffer = ""
+        self._stream_reasoning_buffer = ""
         self._cancel_event = threading.Event()
-        worker = ChatStreamWorker(provider, messages, self._cancel_event, self)
+        worker = ChatStreamWorker(
+            provider,
+            messages,
+            self._cancel_event,
+            reasoning=self._reasoning_mode,
+            web_search=self._web_search_mode,
+            parent=self,
+        )
         worker.delta.connect(self._on_delta)
+        worker.reasoning_delta.connect(self._on_reasoning_delta)
+        worker.status.connect(self.chat_page.set_stream_status)
         worker.succeeded.connect(self._on_stream_succeeded)
         worker.cancelled.connect(self._on_stream_cancelled)
         worker.failed.connect(self._on_stream_failed)
@@ -524,7 +545,13 @@ class MainWindow(QMainWindow):
         # LLM adapters emit deltas, not cumulative snapshots. Keep the full
         # stream here so the streaming bubble never loses earlier tokens.
         self._stream_buffer += text
-        self.chat_page.update_stream(self._stream_buffer)
+        self.chat_page.update_stream(self._stream_buffer, self._stream_reasoning_buffer)
+
+    def _on_reasoning_delta(self, text: str) -> None:
+        self._stream_reasoning_buffer += text
+        self.chat_page.update_stream(
+            self._stream_buffer, self._stream_reasoning_buffer
+        )
 
     def _usage_for(self, provider: Provider, messages: list[dict], result: CompletionResult) -> tuple[int, int, int]:
         prompt = result.prompt_tokens or context_tokens(messages, provider.system_prompt)
@@ -560,6 +587,7 @@ class MainWindow(QMainWindow):
                 "assistant",
                 content,
                 model=result.model or provider.model,
+                reasoning=result.reasoning or "",
                 token_count=completion,
                 usage=usage,
             )
@@ -606,6 +634,7 @@ class MainWindow(QMainWindow):
                     "assistant",
                     content,
                     model=result.model or provider.model,
+                    reasoning=result.reasoning or "",
                     token_count=completion,
                     usage={
                         "api_id": provider.id,
@@ -654,6 +683,7 @@ class MainWindow(QMainWindow):
         self._stream_provider = None
         self._stream_messages = []
         self._stream_buffer = ""
+        self._stream_reasoning_buffer = ""
 
     def _on_chat_worker_finished(self, worker: ChatStreamWorker) -> None:
         if self._chat_worker is worker:

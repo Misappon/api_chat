@@ -79,6 +79,9 @@ def setup_logging() -> None:
             logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
         )
         logging.basicConfig(level=logging.INFO, handlers=[handler])
+        # Query strings can contain private search text; never log HTTP URLs.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
     except Exception:
         logging.basicConfig(level=logging.INFO)
 

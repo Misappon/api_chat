@@ -398,6 +398,36 @@ QPlainTextEdit#composerEdit {{
 }}
 QLabel#composerHint {{ color: {FAINT}; font-size: 9px; }}
 QLabel#composerTokens {{ color: {FAINT}; font-size: 9px; }}
+QToolButton#modeToggle {{
+    background-color: {SURFACE_2};
+    border: 1px solid {BORDER};
+    border-radius: 7px;
+    color: {MUTED};
+    font-size: 9px;
+    padding: 3px 7px;
+}}
+QToolButton#modeToggle:hover {{ color: {TEXT}; border-color: {ACCENT}; }}
+QToolButton#modeToggle:checked {{
+    background-color: {ACCENT_SOFT};
+    border-color: {ACCENT};
+    color: {TEXT};
+}}
+QToolButton#modeToggle:disabled {{ color: {FAINT}; }}
+QFrame#reasoningBox {{
+    background-color: #101722;
+    border: 1px solid #26324A;
+    border-radius: 8px;
+}}
+QPushButton#reasoningToggle {{
+    background: transparent;
+    border: none;
+    color: {MUTED};
+    text-align: left;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 2px;
+}}
+QPushButton#reasoningToggle:hover {{ color: {TEXT}; }}
 QPushButton#sendButton {{
     background-color: {ACCENT};
     border: none;

@@ -83,6 +83,7 @@ class Message:
     conversation_id: int
     role: str
     content: str
+    reasoning_content: str = ""
     token_count: int = 0
     model: str = ""
     created_at: Optional[datetime] = None
@@ -100,6 +101,7 @@ class Message:
 @dataclass
 class CompletionResult:
     content: str
+    reasoning: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0

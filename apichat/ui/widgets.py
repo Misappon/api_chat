@@ -310,21 +310,17 @@ class MarkdownView(QTextBrowser):
             'font-family: "Microsoft YaHei UI", "Segoe UI"; '
             f'font-size: {font_px(13)}px;'
         )
-        if streaming:
-            self.setPlainText(self._last_text)
-            self.setStyleSheet(inline_css)
-        else:
-            try:
-                escaped = html.escape(self._last_text, quote=False)
-                body = markdown.markdown(
-                    escaped,
-                    extensions=["fenced_code", "tables", "sane_lists", "nl2br"],
-                    output_format="html",
-                )
-            except Exception:
-                body = f"<p>{html.escape(self._last_text).replace(chr(10), '<br>')}</p>"
-            self.setHtml(f"<html><head><style>{css}</style></head><body>{body}</body></html>")
-            self.setStyleSheet(inline_css)
+        try:
+            escaped = html.escape(self._last_text, quote=False)
+            body = markdown.markdown(
+                escaped,
+                extensions=["fenced_code", "tables", "sane_lists", "nl2br"],
+                output_format="html",
+            )
+        except Exception:
+            body = f"<p>{html.escape(self._last_text).replace(chr(10), '<br>')}</p>"
+        self.setHtml(f"<html><head><style>{css}</style></head><body>{body}</body></html>")
+        self.setStyleSheet(inline_css)
         self._adjust_height()
 
     def refresh_style(self) -> None:

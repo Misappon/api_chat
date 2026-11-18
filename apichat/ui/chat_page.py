@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -134,7 +135,7 @@ class ComposerEdit(QPlainTextEdit):
 
 
 class ChatPage(QWidget):
-    send_requested = Signal(str, object)
+    send_requested = Signal(str, object, bool, bool)
     stop_requested = Signal()
     edit_requested = Signal(int, str, str)
     attachment_preview_requested = Signal(int)
@@ -353,6 +354,25 @@ class ChatPage(QWidget):
         composer_footer = QHBoxLayout()
         composer_footer.setContentsMargins(2, 0, 1, 0)
         composer_footer.setSpacing(6)
+        self.reasoning_button = QToolButton()
+        self.reasoning_button.setObjectName("modeToggle")
+        self.reasoning_button.setText("思考")
+        self.reasoning_button.setCheckable(True)
+        self.reasoning_button.setToolTip(
+            "推理模式：要求模型展示/使用推理能力（需模型支持；DeepSeek 自动切换 reasoner）"
+        )
+        self.reasoning_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        composer_footer.addWidget(self.reasoning_button)
+        self.web_search_button = QToolButton()
+        self.web_search_button.setObjectName("modeToggle")
+        self.web_search_button.setText("联网")
+        self.web_search_button.setCheckable(True)
+        self.web_search_button.setToolTip(
+            "在线搜索：只在你手动开启时，将当前问题发送给搜索引擎并参考公开结果"
+        )
+        self.web_search_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.web_search_button.toggled.connect(self._on_search_toggled)
+        composer_footer.addWidget(self.web_search_button)
         self.attach_button = IconButton(
             "paperclip", tooltip="添加图片、PDF 或文本附件（也可拖入、粘贴图片）", size=16
         )
@@ -564,6 +584,8 @@ class ChatPage(QWidget):
     def set_generating(self, generating: bool) -> None:
         self._generating = generating
         self.attach_button.setEnabled(not generating)
+        self.reasoning_button.setEnabled(not generating)
+        self.web_search_button.setEnabled(not generating)
         self.send_button.setObjectName("stopButton" if generating else "sendButton")
         self.send_button.setIcon(
             icon("stop", "#FF9BB0", 17) if generating else icon("send", "#FFFFFF", 17)
@@ -595,9 +617,9 @@ class ChatPage(QWidget):
         self._scroll_to_bottom(force=True)
         return bubble
 
-    def update_stream(self, text: str) -> None:
+    def update_stream(self, text: str, reasoning: str = "") -> None:
         if self._stream_bubble is not None:
-            self._stream_bubble.update_stream(text)
+            self._stream_bubble.update_stream(text, reasoning=reasoning)
             self._scroll_if_pinned()
 
     def set_stream_status(self, text: str) -> None:
@@ -620,6 +642,7 @@ class ChatPage(QWidget):
                 model=model or message.model,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                reasoning=message.reasoning_content,
                 created_at=message.created_at,
             )
             self._stream_bubble = None
@@ -756,6 +779,11 @@ class ChatPage(QWidget):
     # ------------------------------------------------------------------
     # events / signals
     # ------------------------------------------------------------------
+    def _on_search_toggled(self, checked: bool) -> None:
+        if checked and not getattr(self, "_search_warned", False):
+            self._search_warned = True
+            self.show_toast("联网搜索会将当前问题发送到外部搜索服务，结果仅作参考")
+
     def _on_send_clicked(self) -> None:
         if self._generating:
             self.stop_requested.emit()
@@ -766,7 +794,12 @@ class ChatPage(QWidget):
         if not self.current:
             self.new_chat_requested.emit()
             return
-        self.send_requested.emit(text, list(self._draft_attachments))
+        self.send_requested.emit(
+            text,
+            list(self._draft_attachments),
+            self.reasoning_button.isChecked(),
+            self.web_search_button.isChecked(),
+        )
 
     def _on_provider_changed(self, index: int) -> None:
         if self._loading or index < 0:

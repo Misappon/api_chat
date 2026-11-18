@@ -244,6 +244,8 @@ def _anthropic_payload(
     stream: bool,
     max_tokens: int,
     temperature: float,
+    *,
+    reasoning: bool = False,
 ) -> dict:
     converted: list[dict] = []
     for message in messages:
@@ -280,6 +282,11 @@ def _anthropic_payload(
         "messages": converted,
         "stream": stream,
     }
+    if reasoning:
+        budget = max(1024, min(8192, max_tokens // 2))
+        payload["max_tokens"] = max(max_tokens, budget + 1)
+        payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        payload.pop("temperature", None)
     if provider.system_prompt.strip():
         payload["system"] = provider.system_prompt.strip()
     return payload
@@ -302,7 +309,12 @@ def _gemini_url(provider: Provider, stream: bool) -> str:
 
 
 def _gemini_payload(
-    provider: Provider, messages: Iterable[dict], max_tokens: int, temperature: float
+    provider: Provider,
+    messages: Iterable[dict],
+    max_tokens: int,
+    temperature: float,
+    *,
+    reasoning: bool = False,
 ) -> dict:
     contents: list[dict] = []
     for message in messages:
@@ -336,6 +348,11 @@ def _gemini_payload(
             "maxOutputTokens": max(1, max_tokens),
         },
     }
+    if reasoning:
+        payload["generationConfig"]["thinkingConfig"] = {
+            "thinkingBudget": 4096,
+            "includeThoughts": True,
+        }
     if provider.system_prompt.strip():
         payload["systemInstruction"] = {
             "parts": [{"text": provider.system_prompt.strip()}]
@@ -348,6 +365,7 @@ class LLMClient:
 
     def __init__(self, provider: Provider) -> None:
         self.provider = provider
+        self._reasoning = False
 
     # ------------------------------------------------------------------
     # public API
@@ -360,18 +378,27 @@ class LLMClient:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        reasoning: bool = False,
+        on_reasoning: Callable[[str], None] | None = None,
     ) -> CompletionResult:
         provider = self.provider
         if not provider.model.strip():
             raise LLMError("请先在 API 管理中填写模型名称。")
+        self._reasoning = bool(reasoning)
         max_tokens = int(max_tokens or provider.max_output_tokens or 4096)
         temperature = float(provider.temperature if temperature is None else temperature)
 
         if provider.provider == "anthropic":
-            return self._stream_anthropic(messages, on_delta, cancel_event, max_tokens, temperature)
+            return self._stream_anthropic(
+                messages, on_delta, cancel_event, max_tokens, temperature, on_reasoning
+            )
         if provider.provider == "gemini":
-            return self._stream_gemini(messages, on_delta, cancel_event, max_tokens, temperature)
-        return self._stream_openai(messages, on_delta, cancel_event, max_tokens, temperature)
+            return self._stream_gemini(
+                messages, on_delta, cancel_event, max_tokens, temperature, on_reasoning
+            )
+        return self._stream_openai(
+            messages, on_delta, cancel_event, max_tokens, temperature, on_reasoning
+        )
 
     def complete(
         self,
@@ -379,10 +406,12 @@ class LLMClient:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        reasoning: bool = False,
     ) -> CompletionResult:
         provider = self.provider
         if not provider.model.strip():
             raise LLMError("请先在 API 管理中填写模型名称。")
+        self._reasoning = bool(reasoning)
         max_tokens = int(max_tokens or provider.max_output_tokens or 4096)
         temperature = float(provider.temperature if temperature is None else temperature)
         if provider.provider == "anthropic":
@@ -397,14 +426,32 @@ class LLMClient:
     def _openai_body(
         self, messages: list[dict], stream: bool, max_tokens: int, temperature: float
     ) -> dict:
+        model = self.provider.model
+        is_deepseek = "deepseek" in (
+            (self.provider.base_url or "") + " " + (self.provider.model or "")
+        ).lower()
+        if self._reasoning and is_deepseek and model.strip() == "deepseek-chat":
+            # DeepSeek exposes reasoning as a separate model rather than a
+            # generic reasoning_effort parameter.
+            model = "deepseek-reasoner"
         body: dict = {
-            "model": self.provider.model,
+            "model": model,
             "messages": _openai_messages(self.provider, messages),
             "temperature": temperature,
             "stream": stream,
         }
+        if self._reasoning and not is_deepseek:
+            body["reasoning_effort"] = "medium"
+            body.pop("temperature", None)
+        elif self._reasoning and is_deepseek:
+            body.pop("temperature", None)
         if max_tokens:
-            body["max_tokens"] = max(1, int(max_tokens))
+            token_key = (
+                "max_completion_tokens"
+                if self._reasoning and not is_deepseek
+                else "max_tokens"
+            )
+            body[token_key] = max(1, int(max_tokens))
         if stream:
             body["stream_options"] = {"include_usage": True}
         return body
@@ -435,6 +482,7 @@ class LLMClient:
         cancel_event: threading.Event | None,
         max_tokens: int,
         temperature: float,
+        on_reasoning: Callable[[str], None] | None = None,
     ) -> CompletionResult:
         url = _endpoint(self.provider)
         body = self._openai_body(messages, True, max_tokens, temperature)
@@ -462,6 +510,7 @@ class LLMClient:
                 if payload.get("error"):
                     raise LLMError(_payload_error(payload))
                 content = _openai_json_content(payload)
+                reasoning = _openai_json_reasoning(payload)
                 prompt, completion, total = _normalise_usage(payload.get("usage"))
                 if prompt == 0 and completion == 0:
                     prompt = _estimate_prompt(self.provider, messages)
@@ -469,6 +518,7 @@ class LLMClient:
                     total = prompt + completion
                 return CompletionResult(
                     content=content,
+                    reasoning=reasoning,
                     prompt_tokens=prompt,
                     completion_tokens=completion,
                     total_tokens=total,
@@ -478,12 +528,20 @@ class LLMClient:
                 )
 
             parts: list[str] = []
+            reasoning_parts: list[str] = []
             usage_raw: dict = {}
             finish_reason = ""
             model = self.provider.model
             for line in handle.iter_lines():
                 if cancel_event is not None and cancel_event.is_set():
-                    return self._partial(parts, usage_raw, model, finish_reason, cancelled=True)
+                    return self._partial(
+                        parts,
+                        usage_raw,
+                        model,
+                        finish_reason,
+                        cancelled=True,
+                        reasoning="".join(reasoning_parts),
+                    )
                 line = line.strip()
                 if not line or line.startswith(":"):
                     continue
@@ -505,6 +563,13 @@ class LLMClient:
                 for choice in choices:
                     finish_reason = str(choice.get("finish_reason") or finish_reason)
                     delta = choice.get("delta") or {}
+                    reasoning_text = _extract_text(
+                        delta.get("reasoning_content") or delta.get("reasoning")
+                    )
+                    if reasoning_text:
+                        reasoning_parts.append(reasoning_text)
+                        if on_reasoning is not None:
+                            on_reasoning(reasoning_text)
                     text = _extract_text(delta.get("content"))
                     if not text and choice.get("text"):
                         text = str(choice["text"])
@@ -517,7 +582,13 @@ class LLMClient:
                 if usage_raw:
                     pass
                 raise LLMError("模型没有返回文本内容，请检查模型名称或稍后重试。")
-            return self._partial(parts, usage_raw, model, finish_reason)
+            return self._partial(
+                parts,
+                usage_raw,
+                model,
+                finish_reason,
+                reasoning="".join(reasoning_parts),
+            )
         finally:
             handle.close()
 
@@ -537,6 +608,7 @@ class LLMClient:
             raise LLMError(_payload_error(data) if data.get("error") else "模型没有返回内容。")
         return CompletionResult(
             content=content,
+            reasoning=_openai_json_reasoning(data),
             prompt_tokens=prompt,
             completion_tokens=completion,
             total_tokens=total,
@@ -555,17 +627,33 @@ class LLMClient:
         cancel_event: threading.Event | None,
         max_tokens: int,
         temperature: float,
+        on_reasoning: Callable[[str], None] | None = None,
     ) -> CompletionResult:
-        body = _anthropic_payload(self.provider, messages, True, max_tokens, temperature)
+        body = _anthropic_payload(
+            self.provider,
+            messages,
+            True,
+            max_tokens,
+            temperature,
+            reasoning=self._reasoning,
+        )
         handle = self._post_stream(_endpoint(self.provider), body)
         parts: list[str] = []
+        reasoning_parts: list[str] = []
         usage: dict = {}
         finish_reason = ""
         model = self.provider.model
         try:
             for line in handle.iter_lines():
                 if cancel_event is not None and cancel_event.is_set():
-                    return self._partial(parts, usage, model, finish_reason, cancelled=True)
+                    return self._partial(
+                        parts,
+                        usage,
+                        model,
+                        finish_reason,
+                        cancelled=True,
+                        reasoning="".join(reasoning_parts),
+                    )
                 line = line.strip()
                 if not line or line.startswith("event:") or line.startswith(":"):
                     continue
@@ -585,6 +673,13 @@ class LLMClient:
                     usage.update(message.get("usage") or {})
                 elif event_type == "content_block_delta":
                     delta = payload.get("delta") or {}
+                    if delta.get("type") == "thinking_delta":
+                        thinking = delta.get("thinking")
+                        if thinking:
+                            reasoning_parts.append(str(thinking))
+                            if on_reasoning is not None:
+                                on_reasoning(str(thinking))
+                        continue
                     text = delta.get("text") if delta.get("type") == "text_delta" else None
                     if text:
                         parts.append(text)
@@ -604,6 +699,7 @@ class LLMClient:
                 completion = estimate_tokens(content)
             return CompletionResult(
                 content=content,
+                reasoning="".join(reasoning_parts),
                 prompt_tokens=prompt,
                 completion_tokens=completion,
                 total_tokens=prompt + completion,
@@ -617,12 +713,24 @@ class LLMClient:
     def _complete_anthropic(
         self, messages: list[dict], max_tokens: int, temperature: float
     ) -> CompletionResult:
-        body = _anthropic_payload(self.provider, messages, False, max_tokens, temperature)
+        body = _anthropic_payload(
+            self.provider,
+            messages,
+            False,
+            max_tokens,
+            temperature,
+            reasoning=self._reasoning,
+        )
         data = self._post_json(_endpoint(self.provider), body)
         content = "".join(
             block.get("text", "")
             for block in (data.get("content") or [])
             if isinstance(block, dict) and block.get("type") == "text"
+        )
+        reasoning = "".join(
+            str(block.get("thinking") or "")
+            for block in (data.get("content") or [])
+            if isinstance(block, dict) and block.get("type") == "thinking"
         )
         usage = data.get("usage") or {}
         prompt, completion, total = _normalise_usage(usage)
@@ -632,6 +740,7 @@ class LLMClient:
             total = prompt + completion
         return CompletionResult(
             content=content,
+            reasoning=reasoning,
             prompt_tokens=prompt,
             completion_tokens=completion,
             total_tokens=total,
@@ -650,10 +759,14 @@ class LLMClient:
         cancel_event: threading.Event | None,
         max_tokens: int,
         temperature: float,
+        on_reasoning: Callable[[str], None] | None = None,
     ) -> CompletionResult:
-        body = _gemini_payload(self.provider, messages, max_tokens, temperature)
+        body = _gemini_payload(
+            self.provider, messages, max_tokens, temperature, reasoning=self._reasoning
+        )
         handle = self._post_stream(_gemini_url(self.provider, True), body)
         parts: list[str] = []
+        reasoning_parts: list[str] = []
         usage: dict = {}
         finish_reason = ""
         model = self.provider.model
@@ -664,16 +777,27 @@ class LLMClient:
                 payload = json.loads(raw.decode("utf-8", errors="replace"))
                 chunks = payload if isinstance(payload, list) else [payload]
                 for chunk in chunks:
-                    text, usage, finish_reason = _consume_gemini_chunk(
+                    text, thinking, usage, finish_reason = _consume_gemini_chunk(
                         chunk, usage, finish_reason
                     )
+                    if thinking:
+                        reasoning_parts.append(thinking)
+                        if on_reasoning is not None:
+                            on_reasoning(thinking)
                     if text:
                         parts.append(text)
                         on_delta(text)
             else:
                 for line in handle.iter_lines():
                     if cancel_event is not None and cancel_event.is_set():
-                        return self._partial(parts, usage, model, finish_reason, cancelled=True)
+                        return self._partial(
+                            parts,
+                            usage,
+                            model,
+                            finish_reason,
+                            cancelled=True,
+                            reasoning="".join(reasoning_parts),
+                        )
                     line = line.strip()
                     if not line or line.startswith(":"):
                         continue
@@ -688,9 +812,13 @@ class LLMClient:
                     for chunk in chunks:
                         if chunk.get("error"):
                             raise LLMError(_payload_error(chunk))
-                        text, usage, finish_reason = _consume_gemini_chunk(
+                        text, thinking, usage, finish_reason = _consume_gemini_chunk(
                             chunk, usage, finish_reason
                         )
+                        if thinking:
+                            reasoning_parts.append(thinking)
+                            if on_reasoning is not None:
+                                on_reasoning(thinking)
                         if text:
                             parts.append(text)
                             on_delta(text)
@@ -706,6 +834,7 @@ class LLMClient:
                 total = prompt + completion
             return CompletionResult(
                 content=content,
+                reasoning="".join(reasoning_parts),
                 prompt_tokens=prompt,
                 completion_tokens=completion,
                 total_tokens=total,
@@ -719,9 +848,11 @@ class LLMClient:
     def _complete_gemini(
         self, messages: list[dict], max_tokens: int, temperature: float
     ) -> CompletionResult:
-        body = _gemini_payload(self.provider, messages, max_tokens, temperature)
+        body = _gemini_payload(
+            self.provider, messages, max_tokens, temperature, reasoning=self._reasoning
+        )
         data = self._post_json(_gemini_url(self.provider, False), body)
-        text, usage, finish_reason = _consume_gemini_chunk(data, {}, "")
+        text, reasoning, usage, finish_reason = _consume_gemini_chunk(data, {}, "")
         if not text:
             prompt_feedback = data.get("promptFeedback") or {}
             if prompt_feedback.get("blockReason"):
@@ -735,6 +866,7 @@ class LLMClient:
             total = prompt + completion
         return CompletionResult(
             content=text,
+            reasoning=reasoning,
             prompt_tokens=prompt,
             completion_tokens=completion,
             total_tokens=total,
@@ -774,6 +906,7 @@ class LLMClient:
         finish_reason: str,
         *,
         cancelled: bool = False,
+        reasoning: str = "",
     ) -> CompletionResult:
         content = "".join(parts)
         prompt, completion, total = _normalise_usage(usage)
@@ -783,6 +916,7 @@ class LLMClient:
             total = completion
         result = CompletionResult(
             content=content,
+            reasoning=reasoning,
             prompt_tokens=prompt,
             completion_tokens=completion,
             total_tokens=total,
@@ -824,6 +958,17 @@ def _openai_json_content(payload: dict) -> str:
     return content
 
 
+def _openai_json_reasoning(payload: dict) -> str:
+    choices = payload.get("choices") or []
+    if not choices:
+        return ""
+    choice = choices[0] or {}
+    message = choice.get("message") or {}
+    return _extract_text(
+        message.get("reasoning_content") or message.get("reasoning")
+    )
+
+
 def _openai_finish_reason(payload: dict) -> str:
     choices = payload.get("choices") or []
     if not choices:
@@ -833,23 +978,28 @@ def _openai_finish_reason(payload: dict) -> str:
 
 def _consume_gemini_chunk(
     chunk: dict, usage: dict, finish_reason: str
-) -> tuple[str, dict, str]:
+) -> tuple[str, str, dict, str]:
     if not isinstance(chunk, dict):
-        return "", usage, finish_reason
+        return "", "", usage, finish_reason
     if chunk.get("usageMetadata"):
         usage = chunk["usageMetadata"]
     candidates = chunk.get("candidates") or []
     pieces: list[str] = []
+    thoughts: list[str] = []
     for candidate in candidates:
         finish_reason = str(candidate.get("finishReason") or finish_reason)
         content = candidate.get("content") or {}
         for part in content.get("parts") or []:
-            if not isinstance(part, dict) or part.get("thought"):
+            if not isinstance(part, dict):
                 continue
             text = part.get("text")
-            if isinstance(text, str):
+            if not isinstance(text, str):
+                continue
+            if part.get("thought"):
+                thoughts.append(text)
+            else:
                 pieces.append(text)
-    return "".join(pieces), usage, finish_reason
+    return "".join(pieces), "".join(thoughts), usage, finish_reason
 
 
 def _estimate_prompt(provider: Provider, messages: list[dict]) -> int:

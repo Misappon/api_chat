@@ -41,6 +41,10 @@ def conversation_to_text(
         lines.append(f"[{stamp}] {role}")
         lines.append("-" * 60)
         lines.append(message.content.rstrip() or "（无文本内容）")
+        if message.reasoning_content:
+            lines.append("")
+            lines.append("思考过程：")
+            lines.append(message.reasoning_content.rstrip())
         if message.attachments:
             lines.append("")
             lines.append("附件：")

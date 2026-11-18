@@ -176,6 +176,21 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(conversation.api_id, second.id)
         self.assertEqual(conversation.api_alias, "Backup")
 
+    def test_reasoning_content_roundtrip(self) -> None:
+        provider = self._provider("ReasoningAPI")
+        conv_id = self.repo.create_conversation(provider.id)
+        self.repo.add_message(
+            conv_id,
+            "assistant",
+            "final answer",
+            reasoning="private chain of thought",
+            model="reasoner",
+        )
+        messages = self.repo.list_messages(conv_id)
+        self.assertEqual(messages[0].reasoning_content, "private chain of thought")
+        api_messages = self.repo.api_messages(conv_id)
+        self.assertNotIn("reasoning_content", api_messages[0])
+
     def test_message_token_estimates_are_positive(self) -> None:
         self.assertGreater(message_tokens("user", "你好 hello"), 0)
 

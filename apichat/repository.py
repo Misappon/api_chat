@@ -124,6 +124,7 @@ class Repository:
             conversation_id=int(row["conversation_id"]),
             role=row["role"],
             content=row["content"] or "",
+            reasoning_content=row.get("reasoning_content") or "",
             token_count=int(row["token_count"] or 0),
             model=row.get("model") or "",
             created_at=_dt(row.get("created_at")),
@@ -497,6 +498,7 @@ class Repository:
         content: str,
         *,
         model: str = "",
+        reasoning: str = "",
         token_count: Optional[int] = None,
         usage: Optional[dict[str, Any]] = None,
         attachments: Optional[list[Attachment]] = None,
@@ -511,10 +513,18 @@ class Repository:
             with self._transaction() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO messages (conversation_id, role, content, token_count, model)
-                    VALUES (%s,%s,%s,%s,%s)
+                    INSERT INTO messages
+                        (conversation_id, role, content, reasoning_content, token_count, model)
+                    VALUES (%s,%s,%s,%s,%s,%s)
                     """,
-                    (conversation_id, role, content, max(0, tokens), model or ""),
+                    (
+                        conversation_id,
+                        role,
+                        content,
+                        reasoning or "",
+                        max(0, tokens),
+                        model or "",
+                    ),
                 )
                 message_id = int(cursor.lastrowid)
                 self._insert_attachments(cursor, message_id, attachment_list)
