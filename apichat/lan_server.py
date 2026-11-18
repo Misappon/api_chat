@@ -32,6 +32,7 @@ from .llm import LLMClient
 from .models import Conversation, Message
 from .agent import run_reason_search_loop
 from .reasoning import clamp_reasoning_level, reasoning_levels
+from .query_planner import extract_search_query, with_local_time
 from .repository import Repository
 from .tokens import context_tokens, estimate_tokens
 from .web_search import (
@@ -509,8 +510,16 @@ class _Handler(BaseHTTPRequestHandler):
                 planner_prompt = agent_result.planner_prompt_tokens
                 planner_completion = agent_result.planner_completion_tokens
             elif web_search:
+                search_query, query_prompt, query_completion = extract_search_query(
+                    provider, messages
+                )
+                search_query = search_query or content
+                planner_prompt += query_prompt
+                planner_completion += query_completion
                 try:
-                    results = search_configured(content, self.share.search_sources)
+                    results = search_configured(
+                        search_query, self.share.search_sources
+                    )
                 except WebSearchError as exc:
                     self.share.notify_change(conversation_id)
                     self._send_json(
@@ -518,8 +527,9 @@ class _Handler(BaseHTTPRequestHandler):
                     )
                     return
                 messages = with_search_context(
-                    messages, content, search_context(content, results)
+                    messages, search_query, search_context(search_query, results)
                 )
+            messages = with_local_time(messages)
             try:
                 result = LLMClient(provider).complete(
                     messages, reasoning_level=reasoning_level

@@ -10,6 +10,7 @@ from .agent import run_reason_search_loop
 from .importer import import_from_html_file, import_from_url, parse_transcript
 from .llm import LLMClient, LLMError, title_messages
 from .models import CompletionResult, Provider
+from .query_planner import extract_search_query, with_local_time
 from .tokens import context_tokens, estimate_tokens
 from .web_search import (
     WebSearchError,
@@ -75,18 +76,28 @@ class ChatStreamWorker(QThread):
                     planner_prompt = agent_result.planner_prompt_tokens
                     planner_completion = agent_result.planner_completion_tokens
                 else:
-                    self.status.emit("正在搜索网页…")
+                    self.status.emit("正在提取搜索关键词…")
+                    search_query, query_prompt, query_completion = extract_search_query(
+                        self.provider, messages
+                    )
+                    search_query = search_query or query
+                    self.status.emit(f"正在搜索网页：{search_query[:60]}")
                     try:
-                        results = search_configured(query, self.search_sources)
+                        results = search_configured(
+                            search_query, self.search_sources
+                        )
                     except WebSearchError as exc:
                         self.failed.emit(f"在线搜索失败：{exc}")
                         return
                     messages = with_search_context(
-                        messages, query, search_context(query, results)
+                        messages, search_query, search_context(search_query, results)
                     )
+                    planner_prompt += query_prompt
+                    planner_completion += query_completion
                     self.status.emit(
                         f"已获取 {len(results)} 条搜索结果，正在请求模型…"
                     )
+            messages = with_local_time(messages)
             if self.cancel_event.is_set():
                 self.cancelled.emit(
                     CompletionResult(content="", finish_reason="cancelled")
