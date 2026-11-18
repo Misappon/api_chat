@@ -30,7 +30,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -38,6 +38,9 @@ from bs4 import BeautifulSoup
 BING_URL = "https://cn.bing.com/search"
 DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
 TAVILY_URL = "https://api.tavily.com/search"
+BAIDU_AI_URL = "https://qianfan.baidubce.com/v2/ai_search/chat/completions"
+BAIDU_AI_MODEL = "ernie-4.5-turbo-32k"
+MIN_VALID_RESULTS = 1
 MAX_QUERY_CHARS = 500
 MAX_RESULTS = 5
 MAX_TOTAL_RESULTS = 12
@@ -47,6 +50,51 @@ _WHITESPACE = re.compile(r"\s+")
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 _SEARCH_LOCK = threading.Lock()
 _LAST_SEARCH_AT = 0.0
+_STATS_LOCK = threading.Lock()
+_SOURCE_STATS: dict[str, dict[str, object]] = {}
+
+
+def record_source_call(source: dict[str, str], success: bool) -> None:
+    key = str(source.get("id") or source.get("type") or source.get("label") or "unknown")
+    with _STATS_LOCK:
+        entry = _SOURCE_STATS.setdefault(
+            key,
+            {
+                "id": key,
+                "label": source.get("label") or source.get("type") or key,
+                "type": source.get("type") or "",
+                "calls": 0,
+                "failures": 0,
+            },
+        )
+        entry["calls"] = int(entry["calls"]) + 1
+        if not success:
+            entry["failures"] = int(entry["failures"]) + 1
+
+
+def get_source_stats() -> list[dict[str, object]]:
+    with _STATS_LOCK:
+        return [dict(item) for item in _SOURCE_STATS.values()]
+
+
+def seed_source_stats(raw: object) -> None:
+    if not isinstance(raw, list):
+        return
+    with _STATS_LOCK:
+        for item in raw:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            key = str(item["id"])
+            _SOURCE_STATS.setdefault(
+                key,
+                {
+                    "id": key,
+                    "label": str(item.get("label") or item.get("type") or key),
+                    "type": str(item.get("type") or ""),
+                    "calls": max(0, int(item.get("calls") or 0)),
+                    "failures": max(0, int(item.get("failures") or 0)),
+                },
+            )
 
 
 @dataclass(frozen=True)
@@ -62,7 +110,7 @@ DEFAULT_SEARCH_SOURCES = [
 ]
 
 
-SEARCH_SOURCE_TYPES = ("bing", "duckduckgo", "searxng", "tavily")
+SEARCH_SOURCE_TYPES = ("bing", "duckduckgo", "searxng", "tavily", "baidu")
 _HIDDEN_PREFIX = "••••"
 
 
@@ -90,12 +138,12 @@ def merge_secrets(new_sources: list[dict], previous: list[dict]) -> list[dict]:
     merged: list[dict] = []
     for source in new_sources:
         data = dict(source)
-        if data.get("type") == "tavily":
+        if data.get("type") in {"tavily", "baidu"}:
             key = str(data.get("api_key") or "")
             if not key or key.startswith(_HIDDEN_PREFIX):
                 data["api_key"] = lookup.get(
                     str(data.get("id") or ""), ""
-                ) or type_lookup.get("tavily", "")
+                ) or type_lookup.get(str(data.get("type")), "")
         merged.append(data)
     return merged
 
@@ -160,13 +208,15 @@ def normalise_search_sources(raw: object) -> list[dict]:
             )
         elif kind == "tavily":
             data.update(id="tavily", label="Tavily", endpoint=TAVILY_URL)
+        elif kind == "baidu":
+            data.update(id="baidu", label="百度 AI搜索", endpoint=BAIDU_AI_URL)
         else:
             if not _is_public_https_url(data["endpoint"]):
                 continue
             data["label"] = (data["label"] or "SearXNG")[:80]
             data["id"] = data["id"] or f"searxng-{len(result) + 1}"
             data["api_key"] = ""
-        if kind in {"bing", "duckduckgo", "tavily"} and kind in kinds:
+        if kind in {"bing", "duckduckgo", "tavily", "baidu"} and kind in kinds:
             continue
         if (kind, data["endpoint"]) in seen:
             continue
@@ -429,6 +479,113 @@ def _tavily_search(
     return results
 
 
+def _parse_baidu_json(
+    payload: object, query: str, max_results: int
+) -> list[SearchResult]:
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    refs = (
+        payload.get("references")
+        or data.get("references")
+        or data.get("search_results")
+        or data.get("results")
+        or []
+    )
+    results: list[SearchResult] = []
+    seen: set[str] = set()
+    for item in refs if isinstance(refs, list) else []:
+        if not isinstance(item, dict):
+            continue
+        url = _safe_url(str(item.get("url") or ""))
+        if not url or url in seen:
+            continue
+        title = _clean(str(item.get("title") or ""), MAX_TITLE_CHARS)
+        snippet = _clean(
+            str(item.get("content") or item.get("snippet") or ""),
+            MAX_SNIPPET_CHARS,
+        )
+        if not title:
+            continue
+        seen.add(url)
+        results.append(SearchResult(title=title, url=url, snippet=snippet))
+        if len(results) >= max_results:
+            return results
+    if results:
+        return results
+    # Some AI Search responses contain an answer but no reference array. Keep
+    # it as a clearly-labelled result rather than dropping the answer.
+    choices = payload.get("choices") or []
+    answer = str(data.get("answer") or payload.get("answer") or "")
+    if not answer and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message") or {}
+        answer = str(message.get("content") or "")
+    if answer:
+        results.append(
+            SearchResult(
+                title="百度 AI搜索摘要",
+                url="https://www.baidu.com/s?wd=" + quote(query),
+                snippet=_clean(answer, MAX_SNIPPET_CHARS),
+            )
+        )
+    return results
+
+
+def _baidu_search(
+    source: dict[str, str], query: str, max_results: int, timeout: float
+) -> list[SearchResult]:
+    api_key = str(source.get("api_key") or "").strip()
+    if not api_key:
+        raise WebSearchError("未填写百度 AI搜索 API Key")
+    body = {
+        "model": BAIDU_AI_MODEL,
+        "messages": [{"role": "user", "content": query}],
+        "stream": False,
+        "search_source": "baidu_search_v2",
+        "enable_corner_markers": True,
+        "resource_type_filter": [
+            {"type": "web", "top_k": max(1, min(max_results, 20))}
+        ],
+    }
+    headers = _request_headers()
+    headers.update(
+        {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+    )
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(timeout, connect=8.0),
+            follow_redirects=False,
+            trust_env=True,
+            headers=headers,
+        ) as client:
+            response = client.post(BAIDU_AI_URL, json=body)
+            response.raise_for_status()
+            if len(response.content) > 3 * 1024 * 1024:
+                raise WebSearchError("返回内容过大，已停止读取。")
+            try:
+                results = _parse_baidu_json(response.json(), query, max_results)
+            except ValueError:
+                results = []
+    except WebSearchError:
+        raise
+    except httpx.HTTPStatusError as exc:
+        code = exc.response.status_code
+        hints = {
+            401: "API Key 无效",
+            403: "API Key 无权限或未开通百度 AI搜索",
+            429: "额度用尽或请求过于频繁",
+        }
+        raise WebSearchError(hints.get(code, f"HTTP {code}")) from exc
+    except httpx.HTTPError as exc:
+        raise WebSearchError(f"无法连接：{exc}") from exc
+    if not results:
+        raise WebSearchError("没有找到相关网页结果")
+    return results
+
+
 def _search_one(
     source: dict[str, str], query: str, max_results: int, timeout: float
 ) -> list[SearchResult]:
@@ -436,6 +593,8 @@ def _search_one(
     endpoint = source.get("endpoint") or ""
     if kind == "tavily":
         return _tavily_search(source, query, max_results, timeout)
+    if kind == "baidu":
+        return _baidu_search(source, query, max_results, timeout)
     if kind == "bing":
         url = BING_URL
         params = {"q": query, "mkt": "zh-CN", "setlang": "zh-hans"}
@@ -516,9 +675,12 @@ def search_configured(
         try:
             results = _search_one(source, query, max_results, timeout)
         except WebSearchError as exc:
+            record_source_call(source, False)
             errors.append(f"{source.get('label') or source.get('type')}：{exc}")
             continue
-        for result in results:
+        valid = [result for result in results if result.title and result.url]
+        record_source_call(source, bool(valid))
+        for result in valid:
             if result.url in seen:
                 continue
             seen.add(result.url)
@@ -526,6 +688,10 @@ def search_configured(
             all_results.append(result)
             if len(all_results) >= MAX_TOTAL_RESULTS:
                 break
+        # Priority is a fallback chain: once a source returns usable results,
+        # lower-priority sources are not queried or paid for.
+        if len(valid) >= MIN_VALID_RESULTS:
+            break
         if len(all_results) >= MAX_TOTAL_RESULTS:
             break
     if not all_results:

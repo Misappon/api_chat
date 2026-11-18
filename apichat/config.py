@@ -25,6 +25,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "attachment_image_mb": 10,
     "attachment_text_mb": 2,
     "attachment_pdf_mb": 20,
+    "search_stats": [],
     "search_sources": [
         {
             "id": "bing",

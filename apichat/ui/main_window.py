@@ -40,8 +40,10 @@ from ..repository import Repository, RepositoryError
 from ..tokens import context_tokens, estimate_tokens, format_tokens
 from ..web_search import (
     display_search_sources,
+    get_source_stats,
     merge_secrets,
     normalise_search_sources,
+    seed_source_stats,
 )
 from ..workers import ChatStreamWorker, TitleWorker
 from .api_dialog import ApiManagerDialog
@@ -113,6 +115,7 @@ class MainWindow(QMainWindow):
             self.search_sources = normalise_search_sources(
                 self.config.get("search_sources")
             )
+        seed_source_stats(self.config.get("search_stats"))
         app = QApplication.instance()
         if app is not None:
             self._font_scale = apply_font_scale(app, self._font_scale)
@@ -702,6 +705,8 @@ class MainWindow(QMainWindow):
         self._stream_messages = []
         self._stream_buffer = ""
         self._stream_reasoning_buffer = ""
+        self._persist_search_stats()
+        self.dashboard.refresh_search_stats()
 
     def _on_chat_worker_finished(self, worker: ChatStreamWorker) -> None:
         if self._chat_worker is worker:
@@ -969,6 +974,12 @@ class MainWindow(QMainWindow):
             return
         self.dashboard.set_data(totals, rows, api_rows, self.db.name)
         self.dashboard.set_database_name(self.db.name)
+        self._persist_search_stats()
+        self.dashboard.refresh_search_stats()
+
+    def _persist_search_stats(self) -> None:
+        self.config.set("search_stats", get_source_stats(), save=False)
+        self.config.save()
 
     def _refresh_dashboard_if_visible(self) -> None:
         if self.stack.currentWidget() is self.dashboard:

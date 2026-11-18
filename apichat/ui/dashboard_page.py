@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from ..models import ApiUsageRow, DashboardRow, DashboardTotals
 from ..tokens import format_tokens
-from ..web_search import normalise_search_sources
+from ..web_search import get_source_stats, normalise_search_sources
 from .icons import icon
 from .theme import (
     ACCENT,
@@ -151,6 +151,9 @@ class DashboardPage(QWidget):
         super().__init__(parent)
         self._font_scale = 1.0
         self._updating_search_list = False
+        self._search_stats: dict[str, dict] = {
+            str(item.get("id")): item for item in get_source_stats()
+        }
         self._build()
 
     def _build(self) -> None:
@@ -276,7 +279,7 @@ class DashboardPage(QWidget):
         search_title = QLabel("搜索源优先级")
         search_title.setObjectName("limitTitle")
         search_hint = QLabel(
-            "开启联网后按从上到下的顺序搜索并汇总；可增删和调整顺序"
+            "按从上到下的优先级搜索；高优先级源有有效结果后停止；可增删和调整顺序"
         )
         search_hint.setObjectName("limitHint")
         search_layout.addWidget(search_title)
@@ -301,6 +304,7 @@ class DashboardPage(QWidget):
         self.search_type_combo.addItem("DuckDuckGo", "duckduckgo")
         self.search_type_combo.addItem("SearXNG", "searxng")
         self.search_type_combo.addItem("Tavily", "tavily")
+        self.search_type_combo.addItem("百度 AI搜索", "baidu")
         source_row.addWidget(self.search_type_combo)
         add_source = QPushButton("添加")
         add_source.setObjectName("smallButton")
@@ -560,6 +564,13 @@ class DashboardPage(QWidget):
                 result.append(dict(data))
         return result
 
+    def refresh_search_stats(self) -> None:
+        self._search_stats = {
+            str(item.get("id")): item for item in get_source_stats()
+        }
+        row = self.search_list.currentRow()
+        self._render_search_sources(self._current_search_sources(), select_row=row)
+
     def _render_search_sources(self, sources: list[dict], select_row: int = -1) -> None:
         self._updating_search_list = True
         self.search_list.blockSignals(True)
@@ -568,10 +579,16 @@ class DashboardPage(QWidget):
             enabled = source.get("enabled", True)
             mark = "✓" if enabled else "✗"
             key_hint = ""
-            if source.get("type") == "tavily":
+            if source.get("type") in {"tavily", "baidu"}:
                 key_hint = " · 已配置 Key" if source.get("api_key") else " · 未配置 Key"
+            stat = self._search_stats.get(str(source.get("id") or ""))
+            count_hint = ""
+            if stat:
+                count_hint = f" · 调用 {stat.get('calls', 0)}"
+                if stat.get("failures"):
+                    count_hint += f"（失败 {stat['failures']}）"
             item = QListWidgetItem(
-                f"{index + 1}. {source.get('label') or source.get('type')}  {mark}{key_hint}"
+                f"{index + 1}. {source.get('label') or source.get('type')}  {mark}{key_hint}{count_hint}"
             )
             if not enabled:
                 item.setForeground(QColor(FAINT))
@@ -628,11 +645,17 @@ class DashboardPage(QWidget):
             if not ok or not endpoint.strip():
                 return
             endpoint = endpoint.strip()
-        elif kind == "tavily":
+        elif kind in {"tavily", "baidu"}:
+            title = "添加 Tavily" if kind == "tavily" else "添加百度 AI搜索"
+            hint = (
+                "Tavily API Key（以 tvly- 开头，保存在本地配置中）："
+                if kind == "tavily"
+                else "百度智能云 API Key（保存在本地配置中）："
+            )
             api_key, ok = QInputDialog.getText(
                 self,
-                "添加 Tavily",
-                "Tavily API Key（以 tvly- 开头，保存在本地配置中）：",
+                title,
+                hint,
                 QLineEdit.EchoMode.Password,
             )
             if not ok or not api_key.strip():
@@ -649,6 +672,7 @@ class DashboardPage(QWidget):
                     "duckduckgo": "DuckDuckGo",
                     "searxng": "SearXNG",
                     "tavily": "Tavily",
+                    "baidu": "百度 AI搜索",
                 }.get(kind, kind),
                 "endpoint": endpoint,
                 "api_key": api_key,
@@ -668,12 +692,14 @@ class DashboardPage(QWidget):
     def _edit_tavily_key(self) -> None:
         row = self.search_list.currentRow()
         sources = self._current_search_sources()
-        if row < 0 or sources[row].get("type") != "tavily":
-            QMessageBox.information(self, "无法编辑", "请先选中 Tavily 搜索源。")
+        if row < 0 or sources[row].get("type") not in {"tavily", "baidu"}:
+            QMessageBox.information(
+                self, "无法编辑", "请先选中 Tavily 或百度 AI搜索源。"
+            )
             return
         api_key, ok = QInputDialog.getText(
             self,
-            "Tavily API Key",
+            "更新 API Key",
             "输入新的 API Key（留空则表示不修改）：",
             QLineEdit.EchoMode.Password,
         )

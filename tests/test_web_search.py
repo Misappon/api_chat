@@ -52,7 +52,31 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(_safe_url(href), target)
         self.assertEqual(_safe_url("javascript:alert(1)"), "")
 
-    def test_sources_are_ordered_and_deduplicated(self) -> None:
+    def test_sources_stop_after_first_valid_priority(self) -> None:
+        sources = normalise_search_sources(
+            [
+                {"type": "bing"},
+                {"type": "duckduckgo"},
+            ]
+        )
+        calls: list[str] = []
+
+        def fake_search(source, query, max_results, timeout):
+            calls.append(source["type"])
+            return [
+                SearchResult("Bing result", "https://example.com/a", "one"),
+                SearchResult("Shared", "https://example.com/shared", "shared"),
+            ]
+
+        with patch("apichat.web_search._search_one", side_effect=fake_search):
+            results = search_configured(
+                "example", sources, enforce_rate_limit=False
+            )
+        self.assertEqual(calls, ["bing"])
+        self.assertEqual([item.title for item in results], ["Bing result", "Shared"])
+        self.assertEqual([item.source for item in results], ["Bing", "Bing"])
+
+    def test_sources_fall_back_when_higher_priority_fails(self) -> None:
         sources = normalise_search_sources(
             [
                 {"type": "bing"},
@@ -64,22 +88,15 @@ class WebSearchTests(unittest.TestCase):
         def fake_search(source, query, max_results, timeout):
             calls.append(source["type"])
             if source["type"] == "bing":
-                return [
-                    SearchResult("Bing result", "https://example.com/a", "one"),
-                    SearchResult("Shared", "https://example.com/shared", "shared"),
-                ]
-            return [
-                SearchResult("DDG result", "https://example.com/b", "two"),
-                SearchResult("Shared again", "https://example.com/shared", "dup"),
-            ]
+                raise WebSearchError("blocked")
+            return [SearchResult("DDG", "https://example.com/ddg", "two")]
 
         with patch("apichat.web_search._search_one", side_effect=fake_search):
             results = search_configured(
                 "example", sources, enforce_rate_limit=False
             )
         self.assertEqual(calls, ["bing", "duckduckgo"])
-        self.assertEqual([item.title for item in results], ["Bing result", "Shared", "DDG result"])
-        self.assertEqual([item.source for item in results], ["Bing", "Bing", "DuckDuckGo"])
+        self.assertEqual(results[0].source, "DuckDuckGo")
 
     def test_disabled_sources_are_skipped(self) -> None:
         sources = normalise_search_sources(
@@ -120,6 +137,50 @@ class WebSearchTests(unittest.TestCase):
 
         with self.assertRaises(WebSearchError):
             _search_one({"type": "tavily", "api_key": ""}, "q", 5, 5.0)
+
+    def test_baidu_references_are_parsed(self) -> None:
+        from apichat.web_search import _parse_baidu_json
+
+        payload = {
+            "references": [
+                {
+                    "title": "百度结果",
+                    "url": "https://example.com/baidu",
+                    "content": "百度 AI搜索摘要",
+                }
+            ]
+        }
+        results = _parse_baidu_json(payload, "测试", 5)
+        self.assertEqual(results[0].title, "百度结果")
+        self.assertEqual(results[0].snippet, "百度 AI搜索摘要")
+
+    def test_baidu_answer_fallback(self) -> None:
+        from apichat.web_search import _parse_baidu_json
+
+        payload = {
+            "answer": "这是百度 AI 的摘要",
+            "choices": [{"message": {"content": "这是百度 AI 的摘要"}}],
+            "references": [],
+        }
+        results = _parse_baidu_json(payload, "测试", 5)
+        self.assertEqual(len(results), 1)
+        self.assertIn("百度", results[0].title)
+        self.assertIn("baidu.com", results[0].url)
+
+    def test_baidu_key_is_masked_and_merged(self) -> None:
+        stored = normalise_search_sources(
+            [{"type": "baidu", "api_key": "baidu-secret-value-9999"}]
+        )
+        masked = display_search_sources(stored)
+        self.assertNotIn("secret-value", masked[0]["api_key"])
+        merged = merge_secrets(masked, stored)
+        self.assertEqual(merged[0]["api_key"], "baidu-secret-value-9999")
+
+    def test_baidu_requires_api_key(self) -> None:
+        from apichat.web_search import _search_one
+
+        with self.assertRaises(WebSearchError):
+            _search_one({"type": "baidu", "api_key": ""}, "q", 5, 5.0)
 
     def test_untrusted_boundary_and_latest_user_turn(self) -> None:
         results = _parse_results(BING_HTML, 5)
