@@ -58,7 +58,11 @@ def clean_query(value: str, fallback: str = "") -> str:
 
 def local_time_text() -> str:
     now = datetime.now().astimezone()
-    return f"[本地系统时间｜可信] {now.strftime('%Y-%m-%d %H:%M:%S %Z%z')}"
+    return (
+        f"[本地系统时间｜可信] {now.strftime('%Y-%m-%d %H:%M:%S %Z%z')}\n"
+        "[时间规则] 用户询问当前日期/时间时，以此本地系统时间为准；"
+        "搜索结果中的时间可能已过期，不可当作当前时间。"
+    )
 
 
 def with_local_time(messages: list[dict]) -> list[dict]:
