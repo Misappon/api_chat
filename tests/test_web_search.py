@@ -154,6 +154,21 @@ class WebSearchTests(unittest.TestCase):
         self.assertEqual(results[0].title, "百度结果")
         self.assertEqual(results[0].snippet, "百度 AI搜索摘要")
 
+    def test_baidu_references_can_be_a_dict(self) -> None:
+        from apichat.web_search import _parse_baidu_json
+
+        payload = {
+            "references": {
+                "1": {
+                    "title": "对象格式结果",
+                    "url": "https://example.com/dict",
+                    "snippet": "摘要",
+                }
+            }
+        }
+        results = _parse_baidu_json(payload, "测试", 5)
+        self.assertEqual(results[0].title, "对象格式结果")
+
     def test_baidu_answer_fallback(self) -> None:
         from apichat.web_search import _parse_baidu_json
 

@@ -167,9 +167,9 @@ build_exe.bat
 **百度 AI搜索**
 
 - 选择「百度 AI搜索」并粘贴百度智能云/千帆的 API Key。
-- 请求地址固定为 `https://qianfan.baidubce.com/v2/ai_search/chat/completions`。
-- 使用 `search_source=baidu_search_v2`，模型默认 `ernie-4.5-turbo-32k`。
-- 解析返回的 `references`（标题、URL、正文片段）；没有 references 时使用 `answer` 摘要作为一条结果。
+- 请求地址固定为 `https://qianfan.baidubce.com/v2/ai_search/web_search`。
+- 请求体使用 `search_source=baidu_search_v2`、`edition=standard` 和 `resource_type_filter`。
+- 解析返回的 `references`（标题、URL、正文片段），兼容 `references` 为数组或对象两种格式；没有 references 时使用 `answer` 摘要作为一条结果。
 - Key 与 Tavily 一样只保存在本地配置中，界面脱敏显示。
 - 计费、额度和模型可用性以百度智能云控制台为准。
 
@@ -357,7 +357,7 @@ python -m unittest discover -s tests -v
 - `tests/test_agent.py` 覆盖思考/搜索循环的置信度停止条件和最终上下文注入。
 - `tests/test_reasoning.py` 覆盖不同模型类别的推理等级映射。
 - `tests/test_query_planner.py` 覆盖搜索词提取、清洗、失败回退和本地时间注入。
-- 当前共 52 个测试。
+- 当前共 53 个测试。
 - 可选的演示数据：
 
   ```powershell

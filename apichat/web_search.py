@@ -38,8 +38,8 @@ from bs4 import BeautifulSoup
 BING_URL = "https://cn.bing.com/search"
 DUCKDUCKGO_URL = "https://html.duckduckgo.com/html/"
 TAVILY_URL = "https://api.tavily.com/search"
-BAIDU_AI_URL = "https://qianfan.baidubce.com/v2/ai_search/chat/completions"
-BAIDU_AI_MODEL = "ernie-4.5-turbo-32k"
+BAIDU_AI_URL = "https://qianfan.baidubce.com/v2/ai_search/web_search"
+BAIDU_AI_EDITION = "standard"
 MIN_VALID_RESULTS = 1
 MAX_QUERY_CHARS = 500
 MAX_RESULTS = 5
@@ -492,6 +492,8 @@ def _parse_baidu_json(
         or data.get("results")
         or []
     )
+    if isinstance(refs, dict):
+        refs = list(refs.values())
     results: list[SearchResult] = []
     seen: set[str] = set()
     for item in refs if isinstance(refs, list) else []:
@@ -538,11 +540,9 @@ def _baidu_search(
     if not api_key:
         raise WebSearchError("未填写百度 AI搜索 API Key")
     body = {
-        "model": BAIDU_AI_MODEL,
         "messages": [{"role": "user", "content": query}],
-        "stream": False,
         "search_source": "baidu_search_v2",
-        "enable_corner_markers": True,
+        "edition": BAIDU_AI_EDITION,
         "resource_type_filter": [
             {"type": "web", "top_k": max(1, min(max_results, 20))}
         ],
